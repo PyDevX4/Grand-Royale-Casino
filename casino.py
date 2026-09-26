@@ -12954,6 +12954,397 @@ class Settings:
 
 
 # --------------------------------------------------------------------------
+# Main menu - the opening scene, then GAMBLE / QUIT
+# --------------------------------------------------------------------------
+TITLE_TEXT = "GRAND ROYALE"
+TITLE_Y = 262                    # centre line of the big title
+TITLE_SLAM = 2.5                 # when the first letter lands
+TITLE_LETTER_GAP = 0.07          # seconds between letters
+INTRO_END = 4.3                  # everything is in place (a click skips straight here)
+FAN_CARDS = [("10", "S"), ("J", "S"), ("Q", "S"), ("K", "S"), ("A", "S")]
+
+
+def ease_out_back(k):
+    c = 1.9
+    return 1 + (c + 1) * (k - 1) ** 3 + c * (k - 1) ** 2
+
+
+class Title:
+    key = "title"
+
+    def __init__(self, app):
+        self.app = app
+        self.t = 0.0
+        self.bg = gradient_bg((40, 8, 16), (4, 2, 6))
+        self.vignette = self.make_vignette()
+        self.letters = self.make_letters()
+        self.glow = self.make_glow()
+        self.fx = pygame.Surface((W, H), pygame.SRCALPHA)
+        self.layer = pygame.Surface((W, H), pygame.SRCALPHA)
+        self.chips = []                   # falling / exploding chips
+        self.floaters = [self.new_floater(random.uniform(0, H)) for _ in range(14)]
+        self.sparks = []
+        self.twinkles = []
+        self.shake = 0.0
+        self.flash = 0.0
+        self.played = set()               # sound cues already played
+        self.btn_play = Button((W / 2 - 190, 436, 380, 84), "GAMBLE", (25, 120, 60), 38, "ENTER")
+        self.btn_quit = Button((W / 2 - 120, 544, 240, 58), "QUIT", (140, 30, 40), 24)
+        rng = random.Random(3)
+        self.rain = [{"x": rng.uniform(40, W - 40), "delay": rng.uniform(0.9, 2.3), "vy": rng.uniform(520, 820),
+                      "spin": rng.uniform(0, 6), "vs": rng.uniform(5, 11), "v": rng.choice(CHIP_VALUES[:9]),
+                      "r": rng.randint(16, 26)} for _ in range(34)]
+
+    # ---- pre-drawn pieces --------------------------------------------------
+    def make_letters(self):
+        f = font(112, bold=True, serif=True)
+        out = []
+        x = 0
+        pieces = []
+        for ch in TITLE_TEXT:
+            if ch == " ":
+                x += 40
+                continue
+            mask = f.render(ch, True, (255, 255, 255))
+            w, h = mask.get_size()
+            grad = pygame.Surface((w, h), pygame.SRCALPHA)
+            for y in range(h):
+                k = y / max(1, h - 1)
+                col = lerp_col((255, 244, 190), (255, 196, 60), min(1, k * 1.6)) if k < 0.62 else \
+                    lerp_col((255, 196, 60), (170, 110, 20), (k - 0.62) / 0.38)
+                pygame.draw.line(grad, col, (0, y), (w, y))
+            grad.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+            shadow = f.render(ch, True, (40, 8, 10))
+            outline = f.render(ch, True, (90, 50, 10))
+            pieces.append((ch, x, grad, shadow, outline, mask))
+            x += w - 2
+        total = x
+        left = W / 2 - total / 2
+        for ch, lx, grad, shadow, outline, mask in pieces:
+            cx = left + lx + grad.get_width() / 2
+            out.append({"cx": cx, "img": grad, "shadow": shadow, "outline": outline, "mask": mask})
+        self.title_left, self.title_right = left, left + total
+        return out
+
+    @staticmethod
+    def make_glow():
+        g = pygame.Surface((980, 300), pygame.SRCALPHA)
+        for i in range(40):
+            k = i / 39
+            pygame.draw.ellipse(g, (255, 170, 60, int(5 + 4 * k)),
+                                (490 * k, 150 * k, 980 * (1 - k), 300 * (1 - k)))
+        return g
+
+    @staticmethod
+    def make_vignette():
+        v = pygame.Surface((W, H), pygame.SRCALPHA)
+        for i in range(60):
+            k = i / 59
+            pygame.draw.rect(v, (0, 0, 0, int(160 * (1 - k) ** 2)), (i * 4, i * 3, W - i * 8, H - i * 6), width=6)
+        return v
+
+    def new_floater(self, y=None):
+        return {"x": random.uniform(0, W), "y": H + 40 if y is None else y, "vy": random.uniform(18, 45),
+                "spin": random.uniform(0, 6), "vs": random.uniform(0.6, 1.6), "v": random.choice(CHIP_VALUES),
+                "r": random.randint(10, 20), "a": random.randint(40, 110)}
+
+    # ---- scene plumbing --------------------------------------------------------
+    def can_leave(self):
+        return False
+
+    def outstanding_bets(self):
+        return 0
+
+    def leave(self):
+        pass
+
+    def on_enter(self):
+        pass
+
+    def done(self):
+        return self.t >= INTRO_END
+
+    def skip(self):
+        if not self.done():
+            self.t = INTRO_END
+            self.played |= {"slam", "boom", "win"}
+            for L in self.letters:
+                L["landed"] = True
+
+    def handle(self, e):
+        if not self.done():
+            if e.type in (pygame.MOUSEBUTTONDOWN, pygame.KEYDOWN):
+                self.skip()
+            return
+        if e.type == pygame.KEYDOWN and e.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+            self.gamble()
+        elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            if self.btn_play.clicked(e.pos):
+                self.gamble()
+            elif self.btn_quit.clicked(e.pos):
+                self.app.quit()
+
+    def gamble(self):
+        self.app.sfx("chip")
+        self.app.scene = "menu"
+
+    # ---- animation -------------------------------------------------------------
+    def cue(self, name, at, sound):
+        if name not in self.played and self.t >= at:
+            self.played.add(name)
+            self.app.sfx(sound)
+            return True
+        return False
+
+    def explode(self):
+        cx, cy = W / 2, TITLE_Y
+        for _ in range(46):
+            a = random.uniform(0, 2 * math.pi)
+            v = random.uniform(300, 900)
+            self.chips.append({"x": cx + math.cos(a) * 60, "y": cy + math.sin(a) * 30, "vx": math.cos(a) * v,
+                               "vy": math.sin(a) * v - 250, "spin": random.uniform(0, 6), "vs": random.uniform(6, 14),
+                               "v": random.choice(CHIP_VALUES), "r": random.randint(14, 26)})
+        for _ in range(140):
+            a = random.uniform(0, 2 * math.pi)
+            v = random.uniform(150, 700)
+            life = random.uniform(0.6, 1.4)
+            self.sparks.append({"x": cx, "y": cy, "vx": math.cos(a) * v, "vy": math.sin(a) * v * 0.6, "life": life,
+                                "max": life, "size": random.uniform(3, 7),
+                                "col": random.choice([(255, 220, 90), (255, 255, 255), (255, 160, 60)])})
+        self.flash = 1.0
+        self.shake = 0.35
+
+    def update(self, dt):
+        before = self.t
+        self.t += dt
+        t = self.t
+        if before < 0.3 <= t:
+            self.app.sfx("launch")
+        for k in range(len(FAN_CARDS)):
+            self.cue(f"card{k}", 1.2 + k * 0.15, "card")
+        for k in range(len(self.letters)):
+            if self.cue(f"letter{k}", TITLE_SLAM + k * TITLE_LETTER_GAP + 0.18, "chip"):
+                self.shake = max(self.shake, 0.08)
+        last = TITLE_SLAM + (len(self.letters) - 1) * TITLE_LETTER_GAP + 0.2
+        if self.cue("slam", last, "boom"):
+            self.explode()
+        self.cue("win", last + 0.35, "win")
+        # physics
+        for c in self.chips:
+            c["x"] += c["vx"] * dt
+            c["y"] += c["vy"] * dt
+            c["vy"] += 900 * dt
+            c["spin"] += c["vs"] * dt
+        self.chips = [c for c in self.chips if c["y"] < H + 60]
+        for p in self.sparks:
+            p["x"] += p["vx"] * dt
+            p["y"] += p["vy"] * dt
+            p["vy"] += 200 * dt
+            p["vx"] *= 1 - dt * 1.2
+            p["life"] -= dt
+        self.sparks = [p for p in self.sparks if p["life"] > 0]
+        for f in self.floaters:
+            f["y"] -= f["vy"] * dt
+            f["spin"] += f["vs"] * dt
+            if f["y"] < -40:
+                f.update(self.new_floater())
+        if self.done() and random.random() < dt * 6:               # glints on the title
+            L = random.choice(self.letters)
+            h = L["img"].get_height()
+            self.twinkles.append([L["cx"] + random.uniform(-25, 25), TITLE_Y + random.uniform(-h * 0.35, h * 0.3), 0.0])
+        for tw in self.twinkles:
+            tw[2] += dt
+        self.twinkles = [tw for tw in self.twinkles if tw[2] < 0.7]
+        self.shake = max(0.0, self.shake - dt)
+        self.flash = max(0.0, self.flash - dt * 2.2)
+
+    # ---- drawing -----------------------------------------------------------------
+    def draw_chip(self, surf, c, alpha=255):
+        w = max(2, int(2 * c["r"] * abs(math.cos(c["spin"]))))
+        img = pygame.transform.smoothscale(self.app.assets.chip(c["v"], c["r"]), (w, 2 * c["r"]))
+        if alpha < 255:
+            img.set_alpha(alpha)
+        surf.blit(img, img.get_rect(center=(c["x"], c["y"])))
+
+    def draw_beams(self, surf, strength):
+        if strength <= 0:
+            return
+        self.fx.fill((0, 0, 0, 0))
+        for base_x, phase, col in ((W * 0.12, 0.0, (255, 210, 140)), (W * 0.88, 2.2, (255, 190, 120)),
+                                   (W * 0.5, 4.1, (210, 170, 255))):
+            ang = math.sin(self.t * 0.6 + phase) * 0.45
+            tip = (base_x, H + 20)
+            length = 900
+            for spread, a in ((0.16, 22), (0.09, 26)):
+                p1 = (tip[0] + math.sin(ang - spread) * length, tip[1] - math.cos(ang - spread) * length)
+                p2 = (tip[0] + math.sin(ang + spread) * length, tip[1] - math.cos(ang + spread) * length)
+                pygame.draw.polygon(self.fx, (*col, int(a * strength)), [tip, p1, p2])
+        surf.blit(self.fx, (0, 0))
+
+    def draw_rays(self, surf, strength):
+        if strength <= 0:
+            return
+        self.fx.fill((0, 0, 0, 0))
+        cx, cy = W / 2, TITLE_Y
+        n = 14
+        for i in range(n):
+            a = self.t * 0.12 + i * 2 * math.pi / n
+            pts = [(cx, cy), (cx + math.cos(a) * 1400, cy + math.sin(a) * 1400),
+                   (cx + math.cos(a + 0.12) * 1400, cy + math.sin(a + 0.12) * 1400)]
+            pygame.draw.polygon(self.fx, (255, 200, 110, int(16 * strength)), pts)
+        surf.blit(self.fx, (0, 0))
+
+    def draw_cards(self, surf):
+        faces = self.app.assets.faces
+        for k, card in enumerate(FAN_CARDS):
+            start = 1.2 + k * 0.15
+            if self.t < start:
+                continue
+            p = min(1.0, (self.t - start) / 0.6)
+            e = 1 - (1 - p) ** 3
+            ang_end = (k - 2) * 13
+            tx, ty = W / 2 + (k - 2) * 58, TITLE_Y - 118 + abs(k - 2) * 12
+            sx, sy = (-200, 820) if k % 2 == 0 else (W + 200, 820)
+            x, y = sx + (tx - sx) * e, sy + (ty - sy) * e - math.sin(p * math.pi) * 180
+            bob = math.sin(self.t * 1.4 + k) * 3 if p >= 1 else 0
+            ang = ang_end + (1 - e) * (720 if k % 2 == 0 else -720)
+            img = pygame.transform.rotozoom(faces[card], -ang, 0.9)
+            surf.blit(img, img.get_rect(center=(x, y + bob)))
+
+    def draw_title(self, surf):
+        glow_k = min(1.0, max(0.0, (self.t - TITLE_SLAM) / 0.8))
+        if glow_k > 0:
+            g = self.glow.copy()
+            g.set_alpha(int(255 * glow_k * (0.85 + 0.15 * math.sin(self.t * 2))))
+            surf.blit(g, g.get_rect(center=(W / 2, TITLE_Y)))
+        for k, L in enumerate(self.letters):
+            start = TITLE_SLAM + k * TITLE_LETTER_GAP
+            if self.t < start:
+                continue
+            p = min(1.0, (self.t - start) / 0.22)
+            scale = 3.2 - 2.2 * p if p < 1 else 1.0
+            alpha = int(255 * min(1.0, p * 2))
+            y = TITLE_Y + (1 - p) * -40
+            for img, off in ((L["shadow"], (6, 7)), (L["outline"], (2, 2)), (L["img"], (0, 0))):
+                im = img if scale == 1.0 else pygame.transform.rotozoom(img, 0, scale)
+                if alpha < 255:
+                    im = im.copy()
+                    im.set_alpha(alpha)
+                surf.blit(im, im.get_rect(center=(L["cx"] + off[0], y + off[1])))
+        # a shine sweeping across the title every few seconds
+        if self.done():
+            sweep = (self.t - INTRO_END) % 4.0
+            if sweep < 1.2:
+                x = self.title_left - 120 + (self.title_right - self.title_left + 240) * (sweep / 1.2)
+                for L in self.letters:
+                    d = abs(L["cx"] - x)
+                    if d < 70:
+                        m = L["mask"].copy()
+                        m.fill((255, 255, 255, int(150 * (1 - d / 70))), special_flags=pygame.BLEND_RGBA_MULT)
+                        surf.blit(m, m.get_rect(center=(L["cx"], TITLE_Y)), special_flags=pygame.BLEND_RGBA_ADD)
+        for x, y, age in self.twinkles:
+            s = 9 * math.sin(age / 0.7 * math.pi)
+            col = (255, 250, 220)
+            pygame.draw.polygon(surf, col, [(x, y - s * 2), (x + s * 0.35, y - s * 0.35), (x + s * 2, y),
+                                            (x + s * 0.35, y + s * 0.35), (x, y + s * 2), (x - s * 0.35, y + s * 0.35),
+                                            (x - s * 2, y), (x - s * 0.35, y - s * 0.35)])
+        # CASINO, letter by letter
+        sub_t = TITLE_SLAM + len(self.letters) * TITLE_LETTER_GAP + 0.35
+        if self.t >= sub_t:
+            word = "C  A  S  I  N  O"
+            n = min(len(word), int((self.t - sub_t) / 0.035) + 1)
+            f = font(30, bold=True)
+            full = f.size(word)[0]
+            draw_text(surf, word[:n], f, (235, 225, 200), (W / 2 - full / 2, TITLE_Y + 88), anchor="midleft")
+            line_k = min(1.0, (self.t - sub_t) / 0.5)
+            for side in (-1, 1):
+                x0 = W / 2 + side * (full / 2 + 24)
+                pygame.draw.line(surf, GOLD, (x0, TITLE_Y + 88), (x0 + side * 150 * line_k, TITLE_Y + 88), 2)
+                pygame.draw.circle(surf, GOLD, (x0 + side * 150 * line_k, TITLE_Y + 88), 4)
+
+    def draw(self, surf):
+        t = self.t
+        mouse = pygame.mouse.get_pos()
+        ox = oy = 0
+        if self.shake:
+            ox, oy = random.randint(-9, 9), random.randint(-7, 7)
+        canvas = surf
+        canvas.fill((0, 0, 0))
+        bg_k = min(1.0, max(0.0, (t - 0.6) / 1.2))
+        if bg_k > 0:
+            b = self.bg
+            if bg_k < 1:
+                b = self.bg.copy()
+                b.set_alpha(int(255 * bg_k))
+            canvas.blit(b, (0, 0))
+        self.draw_rays(canvas, min(1.0, max(0.0, (t - TITLE_SLAM) / 1.0)))
+        self.draw_beams(canvas, bg_k)
+        for f in self.floaters:
+            self.draw_chip(canvas, f, int(f["a"] * bg_k))
+        for c in self.rain:                               # the opening chip shower
+            ct = t - c["delay"]
+            if 0 <= ct and t < INTRO_END + 1:
+                y = -40 + c["vy"] * ct
+                if y < H + 40:
+                    self.draw_chip(canvas, {"x": c["x"], "y": y, "r": c["r"], "v": c["v"],
+                                            "spin": c["spin"] + c["vs"] * ct})
+        # everything that shakes goes on a layer
+        layer = self.layer
+        layer.fill((0, 0, 0, 0))
+        self.draw_cards(layer)
+        self.draw_title(layer)
+        canvas.blit(layer, (ox, oy))
+        for c in self.chips:
+            self.draw_chip(canvas, c)
+        if self.sparks:
+            self.fx.fill((0, 0, 0, 0))
+            for p in self.sparks:
+                k = p["life"] / p["max"]
+                s, x, y = p["size"] * (0.5 + k * 0.5), p["x"], p["y"]
+                pygame.draw.polygon(self.fx, (*p["col"], int(255 * k)),
+                                    [(x, y - s * 2), (x + s * 0.4, y - s * 0.4), (x + s * 2, y), (x + s * 0.4, y + s * 0.4),
+                                     (x, y + s * 2), (x - s * 0.4, y + s * 0.4), (x - s * 2, y), (x - s * 0.4, y - s * 0.4)])
+            canvas.blit(self.fx, (0, 0))
+        # opening line
+        if t < 1.8:
+            a = min(1.0, max(0.0, (t - 0.3) / 0.5)) * min(1.0, max(0.0, (1.7 - t) / 0.4))
+            img = font(22, serif=True).render("a just-for-fun casino", True, (220, 200, 160))
+            img.set_alpha(int(255 * a))
+            canvas.blit(img, img.get_rect(center=(W / 2, H / 2)))
+        # buttons slide up once the title is in
+        btn_k = min(1.0, max(0.0, (t - (INTRO_END - 0.6)) / 0.6))
+        if btn_k > 0:
+            e = ease_out_back(btn_k)
+            for b, y0 in ((self.btn_play, 436), (self.btn_quit, 544)):
+                b.rect.y = int(y0 + (1 - e) * 260)
+            if self.done():
+                pulse = 0.5 + 0.5 * math.sin(t * 3)
+                g = pygame.Surface((self.btn_play.rect.w + 40, self.btn_play.rect.h + 40), pygame.SRCALPHA)
+                pygame.draw.rect(g, (120, 255, 150, int(40 + 50 * pulse)), g.get_rect(), border_radius=34)
+                canvas.blit(g, (self.btn_play.rect.x - 20, self.btn_play.rect.y - 20))
+            self.btn_play.draw(canvas, mouse, self.done())
+            self.btn_quit.draw(canvas, mouse, self.done())
+            info_a = int(255 * btn_k)
+            img = font(16, bold=True).render(f"YOUR CHIPS: {money(self.app.balance)}", True, GOLD)
+            img.set_alpha(info_a)
+            canvas.blit(img, img.get_rect(center=(W / 2, 630)))
+            img = font(12).render("Play money only - chips have no cash value and can't be exchanged for real money.",
+                                  True, (150, 140, 130))
+            img.set_alpha(info_a)
+            canvas.blit(img, img.get_rect(center=(W / 2, 700)))
+            self.app.draw_version(canvas)
+        if not self.done():
+            hint = font(12).render("click to skip", True, (120, 110, 100))
+            canvas.blit(hint, hint.get_rect(bottomright=(W - 14, H - 10)))
+        canvas.blit(self.vignette, (0, 0))
+        if self.flash:
+            f = pygame.Surface((W, H))
+            f.fill((255, 245, 220))
+            f.set_alpha(int(220 * self.flash))
+            canvas.blit(f, (0, 0))
+
+
+# --------------------------------------------------------------------------
 # Lobby / menu
 # --------------------------------------------------------------------------
 def art_blackjack(assets, w, h):
@@ -13584,7 +13975,9 @@ class Menu:
             elif self.btn_profile.clicked(e.pos):
                 self.app.profile.open()
         elif e.type == pygame.KEYDOWN:
-            if e.key in (pygame.K_LEFT, pygame.K_a):
+            if e.key == pygame.K_ESCAPE:
+                self.app.scene = "title"
+            elif e.key in (pygame.K_LEFT, pygame.K_a):
                 self.set_tab((self.tab - 1) % len(CATEGORIES))
             elif e.key in (pygame.K_RIGHT, pygame.K_d):
                 self.set_tab((self.tab + 1) % len(CATEGORIES))
@@ -13724,7 +14117,7 @@ class Menu:
             draw_pill(surf, f"Low on cash? Sell some stocks to play.", font(15, bold=True), (W / 2, 668), GOLD,
                       (0, 0, 0, 200), GOLD_DARK)
         else:
-            draw_text(surf, "Left / Right arrows switch tabs  -  number keys open a game", font(13),
+            draw_text(surf, "Left / Right arrows switch tabs  -  number keys open a game  -  Esc: main menu", font(13),
                       (170, 160, 150), (W / 2, 668))
         draw_text(surf, "Play money only - chips have no cash value and can't be exchanged for real money.",
                   font(12), (150, 140, 130), (W / 2, 706))
@@ -14747,10 +15140,10 @@ class App:
                        "counting": CountingSchool(self), "pinball": Pinball(self), "work": Work(self),
                        "crossy": Crossy(self), "yesno": self.yesno, "cups": Cups(self),
                        "netpoker": NetPoker(self), "netbj": NetBlackjack(self), "online": Online(self),
-                       "settings": Settings(self)}
+                       "settings": Settings(self), "title": Title(self)}
         self.games = list(self.scenes.values())
         self.profile = ProfileOverlay(self)
-        self.scene = "menu"
+        self.scene = "title"            # the game opens on the main menu
         self.lobby_btn = Button((14, 9, 120, 38), "< LOBBY", (60, 45, 30), 18)
         self.help_btn = Button((142, 9, 170, 38), "? HOW TO PLAY", (40, 60, 110), 16)
         self.help = HelpOverlay()
@@ -15156,7 +15549,7 @@ class App:
 
     def draw_others(self, surf):
         """Other players in the same game: their bets and their latest win or loss."""
-        if not self.net or self.scene in ("menu", "online", "netpoker", "netbj", "work", "counting"):
+        if not self.net or self.scene in ("menu", "title", "online", "netpoker", "netbj", "work", "counting"):
             return
         here = self.net.others(self.scene)
         if not here:
@@ -15286,7 +15679,7 @@ class App:
                 self.autosave_t = 30.0
                 self.save()
             up = self.auto_updater
-            if (up and up.state == "ready" and self.scene == "menu" and not self.net and not self.help.active
+            if (up and up.state == "ready" and self.scene in ("menu", "title") and not self.net and not self.help.active
                     and not self.profile.active):
                 if updater.install(up.staged):     # a helper swaps in the new .exe once we close, then restarts it
                     up.state = "installing"

@@ -34,7 +34,7 @@ ICON = "icon.ico"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # What changed - shown on the GitHub release page. Edit before publishing if you like.
-NOTES = "New: an ALL IN button in every game (at the right end of the chip tray). The game installs this update by itself the next time you open it."
+NOTES = "New: a main menu with an opening scene - chips, a royal flush and the title slamming in - plus GAMBLE and QUIT buttons. Press Esc in the lobby to get back to it. The game installs this update by itself the next time you open it."
 DOWNLOAD_NOTE = "\n".join([
     "---",
     "**To play: download the .zip below.** Unzip it and run \"Grand Royale Casino.exe\" inside.",
