@@ -1,0 +1,19 @@
+# Player data - never publish anyone's save, or local update leftovers
+save.json
+save.json.tmp
+update.log
+update.bat
+*.new.exe
+*.new.exe.part
+
+# Build output (the releases carry the builds)
+dist/
+build/
+release/
+*.spec
+icon.ico
+
+# Old copies and caches
+casino.html
+*_backup.py
+__pycache__/
