@@ -321,7 +321,7 @@ def chip_breakdown(amount):
     return chips
 
 
-CHIP_SHOWN = 8          # chips the tray shows at once
+CHIP_SHOWN = 7          # chips the tray shows at once (the ALL IN button sits at the right end)
 CHIP_GAP = 64
 
 
@@ -339,7 +339,7 @@ class ChipWindow:
 
     @staticmethod
     def pos_of(i):
-        return (W / 2 - (CHIP_SHOWN - 1) / 2 * CHIP_GAP + i * CHIP_GAP, CHIP_TRAY_Y)
+        return (410 + i * CHIP_GAP, CHIP_TRAY_Y)
 
     def items(self):
         self.seen = self.frame
@@ -367,7 +367,11 @@ class ChipWindow:
 
     @staticmethod
     def arrows():
-        return pygame.Rect(349, CHIP_TRAY_Y - 16, 26, 32), pygame.Rect(905, CHIP_TRAY_Y - 16, 26, 32)
+        return pygame.Rect(349, CHIP_TRAY_Y - 16, 26, 32), pygame.Rect(829, CHIP_TRAY_Y - 16, 26, 32)
+
+    @staticmethod
+    def all_in_rect():
+        return pygame.Rect(861, CHIP_TRAY_Y - 27, 68, 54)
 
 
 CHIP_WIN = ChipWindow()
@@ -711,6 +715,16 @@ class Blackjack:
                             "ty": BET_Y - 26 - 5 * (len(chip_breakdown(self.bet)) - 1)})
         self.message = ""
         self.app.sfx("chip")
+
+    def all_in(self):
+        """ALL IN: every chip you have goes on the table."""
+        for v in chip_breakdown(self.app.balance):
+            before = self.app.balance
+            self.add_chip(v)
+            if self.app.balance == before:
+                break
+        if self.bet:
+            self.message = f"ALL IN!  BET {money(self.bet)}"
 
     def clear_bet(self):
         if self.state == "result":
@@ -1804,6 +1818,16 @@ class Rocket:
         self.message = ""
         self.app.sfx("chip")
 
+    def all_in(self):
+        """ALL IN: every chip you have goes on the table."""
+        for v in chip_breakdown(self.app.balance):
+            before = self.app.balance
+            self.add_chip(v)
+            if self.app.balance == before:
+                break
+        if self.bet:
+            self.message = f"ALL IN!  BET {money(self.bet)}"
+
     def clear(self):
         self.new_round()
         if self.state == "betting":
@@ -2339,6 +2363,14 @@ class Slots:
             return
         self.bet += v
         self.message = ""
+        self.app.sfx("chip")
+
+    def all_in(self):
+        """ALL IN: bet everything (in steps of $5, since the bet is split over 5 lines)."""
+        if self.state == "spinning":
+            return
+        self.bet = self.app.balance - self.app.balance % 5
+        self.message = f"ALL IN!  BET {money(self.bet)}" if self.bet else "YOU HAVE NO CHIPS TO BET"
         self.app.sfx("chip")
 
     def spin(self):
@@ -3319,6 +3351,14 @@ class Poker:
         taken = {s.name for s in getattr(self, "seats", [])}
         name = random.choice([n for n in BOT_NAMES if n not in taken])
         return Seat(name, random.choice([300, 400, 500, 600, 800, 1000]))
+
+    def all_in(self):
+        """ALL IN: buy in for as much as the table allows."""
+        if self.phase != "idle" or getattr(self, "sitting", 0):
+            return
+        self.buyin = min(BUYIN_MAX, self.app.balance)
+        self.message = f"BUY-IN SET TO {money(self.buyin)} - PRESS SIT DOWN" if self.buyin else "YOU HAVE NO CHIPS"
+        self.app.sfx("chip")
 
     def seated(self):
         return self.phase != "idle"
@@ -4456,6 +4496,14 @@ class MultWheel:
     def slice_under(self):
         return round(-self.rot / MSLICE) % len(MWHEEL)
 
+    def all_in(self):
+        """ALL IN: your whole balance becomes the bet."""
+        if self.state == "spinning":
+            return
+        self.bet = self.app.balance
+        self.message = f"ALL IN!  BET {money(self.bet)}" if self.bet else "YOU HAVE NO CHIPS TO BET"
+        self.app.sfx("chip")
+
     def spin(self):
         if self.state == "spinning":
             return
@@ -4763,6 +4811,16 @@ class RideTheBus:
         self.bet_chips.append(v)
         self.message = ""
         self.app.sfx("chip")
+
+    def all_in(self):
+        """ALL IN: every chip you have goes on the table."""
+        for v in chip_breakdown(self.app.balance):
+            before = self.app.balance
+            self.add_chip(v)
+            if self.app.balance == before:
+                break
+        if self.bet:
+            self.message = f"ALL IN!  BET {money(self.bet)}"
 
     def clear_bet(self):
         if self.state == "result":
@@ -6040,6 +6098,17 @@ class StakeGame:
             self.message = ""
             self.app.sfx("chip")
         return True
+
+    def all_in(self):
+        """ALL IN: your whole balance becomes the bet."""
+        if self.busy():
+            return
+        if self.app.balance <= 0:
+            self.message = "YOU HAVE NO CHIPS TO BET"
+            return
+        self.bet = self.app.balance
+        self.message = f"ALL IN!  BET {money(self.bet)}"
+        self.app.sfx("chip")
 
     def take_bet(self):
         if not self.bet:
@@ -14655,6 +14724,7 @@ class App:
         self.chat_open = False
         self.chat_text = ""
         self.chat_btn = Button((320, 9, 110, 38), "CHAT", (40, 90, 160), 16, None)
+        self.all_in_armed = False
         self.yesno = YesNo(self)
         self.menu = Menu(self)
         self.blackjack = Blackjack(self)
@@ -15028,10 +15098,52 @@ class App:
                 text = f"v{VERSION}  (update v{new} failed - it'll try again next time)"
         draw_text(surf, text, font(12, bold=True), col, (12, 708), anchor="midleft")
 
+    def can_all_in(self):
+        sc = self.current()
+        return CHIP_WIN.visible() and (hasattr(sc, "all_in") or hasattr(sc, "selected"))
+
+    def press_all_in(self):
+        sc = self.current()
+        if hasattr(sc, "all_in"):
+            sc.all_in()
+        elif self.balance <= 0:
+            sc.message = "YOU HAVE NO CHIPS TO BET"
+        else:                                    # roulette, craps...: the next spot you click gets everything
+            self.all_in_armed = not self.all_in_armed
+            self.sfx("chip")
+
+    def armed_click(self, e):
+        """Place the whole balance on whichever spot was clicked, using the game's own betting."""
+        sc = self.current()
+        old, before = sc.selected, self.balance
+        sc.selected = self.balance
+        try:
+            sc.handle(e)
+        finally:
+            sc.selected = old
+        if self.balance != before:
+            self.all_in_armed = False
+
     def draw_chip_arrows(self, surf):
         if not CHIP_WIN.visible():
+            self.all_in_armed = False
             return
         mouse = pygame.mouse.get_pos()
+        if self.can_all_in():
+            r = CHIP_WIN.all_in_rect()
+            armed = self.all_in_armed
+            base = (200, 40, 40) if not armed else lerp_col((230, 50, 50), (255, 200, 60),
+                                                                0.5 + 0.5 * math.sin(time.time() * 8))
+            if r.collidepoint(mouse):
+                base = lighten(base, 30)
+            pygame.draw.rect(surf, darken(base, 60), r.move(0, 3), border_radius=12)
+            pygame.draw.rect(surf, base, r, border_radius=12)
+            pygame.draw.rect(surf, GOLD, r, width=2, border_radius=12)
+            draw_text(surf, "ALL", font(15, bold=True), WHITE, (r.centerx, r.centery - 9), shadow=(0, 0, 0))
+            draw_text(surf, "IN", font(15, bold=True), WHITE, (r.centerx, r.centery + 9), shadow=(0, 0, 0))
+            if armed:
+                draw_pill(surf, f"ALL IN: CLICK A BET SPOT TO PUT ALL {money(self.balance)} ON IT", font(16, bold=True),
+                          (640, 612), WHITE, (160, 30, 30, 235), GOLD, pad=(16, 5))
         for rect, d in zip(CHIP_WIN.arrows(), (-1, 1)):
             can = CHIP_WIN.start > 0 if d < 0 else CHIP_WIN.start < CHIP_WIN.max_start()
             col = GOLD if can else (80, 72, 64)
@@ -15116,6 +15228,15 @@ class App:
                         CHIP_WIN.shift(hit[0])
                         self.sfx("chip")
                         continue
+                    if self.can_all_in() and CHIP_WIN.all_in_rect().collidepoint(e.pos):
+                        self.press_all_in()
+                        continue
+                    if self.all_in_armed:
+                        if e.pos[1] >= 636:              # clicked the chips or buttons instead - cancel
+                            self.all_in_armed = False
+                        elif self.scene != "menu" and not self.lobby_btn.rect.collidepoint(e.pos):
+                            self.armed_click(e)
+                            continue
                 if e.type == pygame.MOUSEWHEEL and CHIP_WIN.visible() and pygame.mouse.get_pos()[1] > 636:
                     CHIP_WIN.shift(-1 if e.y > 0 else 1)
                     continue
@@ -15173,6 +15294,7 @@ class App:
                 up.state = "failed"
             if self.scene != self.last_scene:            # first visit to a game: show its guide
                 self.last_scene = self.scene
+                self.all_in_armed = False
                 self.effects.fade = 1.0
                 CHIP_WIN.auto(self.balance)
                 if self.scene == "menu":
