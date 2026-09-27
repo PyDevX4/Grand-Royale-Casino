@@ -2562,6 +2562,20 @@ STOCK_DEFS = [
     ("MOON", "Moonbeam Mining", 9.5, 0.013, (190, 140, 255)),
     ("TACO", "Taco Galaxy", 27.0, 0.005, (255, 110, 90)),
     ("ROBO", "Robo Butler Co.", 210.0, 0.006, (120, 230, 200)),
+    ("GLDN", "Golden Goose Bank", 64.0, 0.004, (235, 195, 60)),
+    ("DINO", "Dino Theme Parks", 33.0, 0.009, (120, 200, 90)),
+    ("ZOOM", "Zoomster Scooters", 12.5, 0.012, (255, 90, 160)),
+    ("CHOC", "Choco Cloud Sweets", 22.0, 0.006, (180, 120, 80)),
+    ("NEON", "Neon Nights Arcades", 48.0, 0.008, (80, 255, 230)),
+    ("AQUA", "Aqua Farms Co.", 16.0, 0.007, (60, 160, 255)),
+    ("WZRD", "Wizard Games Ltd.", 140.0, 0.009, (150, 90, 255)),
+    ("SNAK", "Snack Attack Foods", 8.5, 0.010, (255, 170, 40)),
+    ("VOLT", "Volt Motors", 260.0, 0.011, (250, 240, 80)),
+    ("PETS", "Happy Paws Pet Co.", 38.0, 0.005, (230, 140, 110)),
+    ("SKYH", "Skyhook Airlines", 55.0, 0.008, (140, 200, 255)),
+    ("GEMZ", "Gem Mountain Mining", 5.2, 0.015, (255, 110, 110)),
+    ("BOTZ", "Botz Robotics", 94.0, 0.007, (170, 170, 190)),
+    ("SURF", "Surf's Up Resorts", 27.5, 0.006, (70, 220, 200)),
 ]
 GOOD_NEWS = ["{name} smashes earnings expectations", "{name} unveils a hit new product",
              "Analysts upgrade {sym} to BUY", "{name} signs a huge partnership deal",
@@ -2588,6 +2602,27 @@ MARKET_EVENTS = [      # (headline, details, {symbol or "ALL": (smallest, bigges
     ("VIRAL HIT!", "Pixel Pals' new game breaks every download record", {"PIXL": (0.4, 0.7)}),
     ("FOOD FIGHT!", "Tacos beat bananas in the great food fight", {"TACO": (0.2, 0.35), "BNNA": (-0.35, -0.2)}),
 ]
+GENERIC_BOOMS = [("{sym} ROCKETS!", "{name} wins a giant government contract"),
+                 ("{sym} GOES VIRAL!", "Everyone on the internet suddenly wants {name}"),
+                 ("{sym} SMASHES RECORDS!", "{name} posts its best year ever")]
+GENERIC_BUSTS = [("{sym} PLUNGES!", "{name} loses its biggest customer"),
+                 ("{sym} SCANDAL!", "{name} caught cooking the books"),
+                 ("{sym} MELTDOWN!", "A disaster shuts down {name} for a month")]
+# Rare, huge moves: (headline, details, "one" = a random company / "all" = every company, (smallest, biggest))
+MEGA_EVENTS = [
+    ("MEGA MOONSHOT!", "{name} is being bought by a trillion-dollar giant", "one", (2.0, 5.0)),
+    ("MIRACLE BREAKTHROUGH!", "{name} invents something that changes the world", "one", (1.5, 4.0)),
+    ("BANKRUPTCY SCARE!", "{name} might not survive the week", "one", (-0.85, -0.65)),
+    ("FRAUD EXPOSED!", "{name}'s bosses are arrested", "one", (-0.80, -0.60)),
+    ("THE GREAT CRASH!", "The whole market collapses in a single afternoon", "all", (-0.50, -0.35)),
+    ("GOLDEN AGE!", "Record profits everywhere - every stock explodes", "all", (0.40, 0.80)),
+]
+MEGA_EVERY = (30 * 60, 75 * 60)
+STOCK_ANCHOR = math.log(2) / (8 * 3600)   # fair value drifts half-way back to normal in about 8 hours
+STOCK_LIMIT = 30                            # no stock goes below 1/30 or above 30x its normal price   # seconds between mega events (random)
+STOCK_BET_TIME = 300              # a higher/lower bet is decided 5 minutes after you place it
+STOCK_BET_PAY = 1.9
+STOCK_BET_MAX = 10                # bets you can have running at once
 MAX_OFFLINE = 6 * 3600          # market catches up for time the game was closed, up to 6 hours
 SPREAD = 0.002                  # buy at the ask (0.1% above the price), sell at the bid (0.1% below)
 UP_COL, DOWN_COL = (60, 210, 120), (235, 80, 80)
@@ -2597,7 +2632,7 @@ class Market:
     HIST = 3600                 # one hour of 1-second prices per stock
 
     def __init__(self, state=None):
-        self.stocks = [{"sym": sym, "name": name, "vol": vol, "color": col, "price": p, "fair": p,
+        self.stocks = [{"sym": sym, "name": name, "vol": vol, "color": col, "price": p, "fair": p, "base": p,
                         "hist": deque([p], maxlen=self.HIST)} for sym, name, p, vol, col in STOCK_DEFS]
         self.holdings = {}
         self.trades = []            # most recent first
@@ -2607,6 +2642,10 @@ class Market:
         self.news_in = random.uniform(25, 60)
         self.event_in = random.uniform(150, 420)
         self.alerts = []            # big events waiting to be shown as notifications
+        self.mega_in = random.uniform(*MEGA_EVERY)
+        self.bets = []              # 5-minute higher/lower bets
+        self.settled = []           # finished bets waiting for the app to pay out
+        self.bet_id = 0
         loaded = False
         if state:
             try:
@@ -2628,19 +2667,33 @@ class Market:
             self.acc -= 1.0
             self.tick(time.time())
 
+    @staticmethod
+    def step(st):
+        """One second of one stock: a slowly wandering (slightly rising) fair value, the price jittering around it."""
+        # ...which is also slowly pulled back towards the company's normal price (half-way in about 8 hours),
+        # so crashes and booms swing things wildly for hours but prices can't drift away forever
+        pull = STOCK_ANCHOR * (math.log(st["base"]) - math.log(st["fair"]))
+        b = st["base"]
+        st["fair"] = min(b * STOCK_LIMIT / 2, max(b / STOCK_LIMIT * 2, st["fair"] * math.exp(pull + 0.0008 * random.gauss(0, 1))))
+        lp, lf = math.log(st["price"]), math.log(st["fair"])
+        lp += st["vol"] * 0.45 * random.gauss(0, 1) + 0.003 * (lf - lp)
+        push = st.get("push", 0.0)
+        if push:                                  # a big event keeps pushing the price for a while
+            step = push * 0.15 if abs(push) > 0.002 else push
+            lp += step
+            st["push"] = push - step
+        st["price"] = min(b * STOCK_LIMIT, max(b / STOCK_LIMIT, math.exp(lp)))
+        st["hist"].append(round(st["price"], 2))
+
     def tick(self, when):
         for st in self.stocks:
-            # a slowly wandering (slightly rising) fair value, with the price jittering around it
-            st["fair"] = min(5000.0, max(1.0, st["fair"] * math.exp(0.0000006 + 0.0008 * random.gauss(0, 1))))
-            lp, lf = math.log(st["price"]), math.log(st["fair"])
-            lp += st["vol"] * 0.45 * random.gauss(0, 1) + 0.003 * (lf - lp)
-            push = st.get("push", 0.0)
-            if push:                                  # a big event keeps pushing the price for a while
-                step = push * 0.15 if abs(push) > 0.002 else push
-                lp += step
-                st["push"] = push - step
-            st["price"] = max(0.5, math.exp(lp))
-            st["hist"].append(round(st["price"], 2))
+            self.step(st)
+        if self.bets:
+            self.settle_bets(when)
+        self.mega_in -= 1
+        if self.mega_in <= 0:
+            self.mega_in = random.uniform(*MEGA_EVERY)
+            self.mega_event(when)
         self.event_in -= 1
         if self.event_in <= 0:
             self.event_in = random.uniform(360, 840)
@@ -2663,7 +2716,30 @@ class Market:
 
     def big_event(self, when):
         """Something huge happens - one or more stocks jump or crash by 15-90%."""
-        title, sub, fx = random.choice(MARKET_EVENTS)
+        syms = {st["sym"] for st in self.stocks}
+        if random.random() < 0.5:                 # a made-up headline about any company
+            st = random.choice(self.stocks)
+            good = random.random() < 0.5
+            title, sub = random.choice(GENERIC_BOOMS if good else GENERIC_BUSTS)
+            title, sub = title.format(sym=st["sym"]), sub.format(name=st["name"])
+            fx = {st["sym"]: (0.25, 0.60) if good else (-0.40, -0.20)}
+        else:
+            title, sub, fx = random.choice([e for e in MARKET_EVENTS if "ALL" in e[2] or set(e[2]) <= syms])
+        self.apply_event(when, title, sub, fx)
+
+    def mega_event(self, when):
+        """Rare and enormous: one company multiplies or collapses, or the whole market swings."""
+        title, sub, scope, rng = random.choice(MEGA_EVENTS)
+        if scope == "all":
+            fx = {"ALL": rng}
+        else:
+            st = random.choice(self.stocks)
+            sub = sub.format(name=st["name"])
+            title = f"{title} ({st['sym']})"
+            fx = {st["sym"]: rng}
+        self.apply_event(when, title, sub, fx, mega=True)
+
+    def apply_event(self, when, title, sub, fx, mega=False):
         moves = []
         for st in self.stocks:
             rng = fx.get(st["sym"], fx.get("ALL"))
@@ -2673,7 +2749,7 @@ class Market:
             jump = math.log(1 + pct)
             st["price"] = max(0.5, st["price"] * math.exp(jump * 0.4))   # 40% right away, the rest over ~20 s
             st["push"] = st.get("push", 0.0) + jump * 0.6
-            st["fair"] = min(5000.0, max(1.0, st["fair"] * math.exp(jump * 0.7)))
+            st["fair"] = min(st["base"] * STOCK_LIMIT / 2, max(st["base"] / STOCK_LIMIT * 2, st["fair"] * math.exp(jump * 0.7)))
             moves.append((st["sym"], pct))
         avg = sum(m for _, m in moves) / len(moves)
         detail = "EVERY STOCK" if "ALL" in fx else "  ".join(f"{sym} {pct * 100:+.0f}%" for sym, pct in moves)
@@ -2683,9 +2759,38 @@ class Market:
                              moves[0][0], "time": time.strftime("%H:%M", time.localtime(when)), "pct": round(avg * 100, 1)})
         del self.news[8:]
         away = time.time() - when > 5
-        self.alerts.append({"title": ("WHILE YOU WERE AWAY: " if away else "") + title,
+        self.alerts.append({"title": ("WHILE YOU WERE AWAY: " if away else "") + ("MEGA EVENT: " if mega else "") + title,
                             "sub": f"{sub}  ({detail})", "kind": "up" if avg > 0 else "down"})
         del self.alerts[:-3]
+
+    # ---- 5-minute higher / lower bets ------------------------------------------
+    def place_bet(self, sym, direction, amount, now=None):
+        now = time.time() if now is None else now
+        self.bet_id += 1
+        bet = {"id": self.bet_id, "sym": sym, "dir": direction, "amount": int(amount),
+               "start": self.stock(sym)["price"], "t0": now, "t1": now + STOCK_BET_TIME}
+        self.bets.append(bet)
+        return bet
+
+    def bet_winning(self, bet):
+        price = self.stock(bet["sym"])["price"]
+        return price > bet["start"] if bet["dir"] == "up" else price < bet["start"]
+
+    def settle_bets(self, when):
+        for bet in [b for b in self.bets if b["t1"] <= when]:
+            self.bets.remove(bet)
+            price = self.stock(bet["sym"])["price"]
+            if price == bet["start"]:
+                payout, result = bet["amount"], "push"
+            elif self.bet_winning(bet):
+                payout, result = int(bet["amount"] * STOCK_BET_PAY), "win"
+            else:
+                payout, result = 0, "lose"
+            self.settled.append(dict(bet, end=price, payout=payout, result=result))
+
+    def pop_settled(self):
+        out, self.settled = self.settled, []
+        return out
 
     def pop_alerts(self):
         out, self.alerts = self.alerts, []
@@ -2763,7 +2868,8 @@ class Market:
     # ---- persistence -----------------------------------------------------
     def to_state(self):
         return {"t": time.time(), "news": self.news, "holdings": self.holdings, "trades": self.trades,
-                "realized": self.realized,
+                "realized": self.realized, "bets": self.bets, "bet_id": self.bet_id,
+                "unpaid": self.settled,
                 "stocks": {s["sym"]: {"price": s["price"], "fair": s["fair"], "hist": list(s["hist"])}
                            for s in self.stocks}}
 
@@ -2778,6 +2884,13 @@ class Market:
         self.news = list(state.get("news", []))[:8]
         self.trades = list(state.get("trades", []))[:30]
         self.realized = float(state.get("realized", 0.0))
+        self.bets = [dict(b) for b in state.get("bets", [])]
+        self.bet_id = int(state.get("bet_id", 0))
+        self.settled = [dict(b) for b in state.get("unpaid", [])]
+        for st in self.stocks:                    # companies added in an update get a little made-up history
+            if st["sym"] not in state["stocks"]:
+                for _ in range(900):
+                    self.step(st)
         saved = float(state.get("t", time.time()))
         for k in range(int(min(MAX_OFFLINE, max(0, time.time() - saved)))):
             self.tick(saved + k)
@@ -2811,7 +2924,11 @@ class Stocks:
         self.news_tab = 0           # 0 = market news, 1 = my trades
         self.message = ""
         self.msg_t = 0.0
-        self.rows = [pygame.Rect(16, 72 + i * 92, 320, 86) for i in range(len(STOCK_DEFS))]
+        self.list_rect = pygame.Rect(16, 66, 324, 560)     # the company list scrolls (there are 20)
+        self.scroll = 0.0
+        self.scroll_to = 0.0
+        self.pos_tab = 0            # 0 = my position, 1 = 5-minute bets
+        self.bet_amt = 0
         self.chart = pygame.Rect(352, 150, 912, 300)
         self.pos_box = pygame.Rect(352, 462, 446, 160)
         self.news_box = pygame.Rect(810, 462, 454, 160)
@@ -2839,6 +2956,17 @@ class Stocks:
         self.btn_sell = Button((1104, 646, 134, 62), "SELL", (160, 40, 45), 24)
         self.news_tabs = [pygame.Rect(self.news_box.x + 10, self.news_box.y + 6, 130, 26),
                           pygame.Rect(self.news_box.x + 146, self.news_box.y + 6, 110, 26)]
+        self.pos_tabs = [pygame.Rect(self.pos_box.x + 10, self.pos_box.y + 6, 150, 26),
+                         pygame.Rect(self.pos_box.x + 166, self.pos_box.y + 6, 170, 26)]
+        # 5-minute bet controls (they replace the share buttons while the BETS tab is open)
+        self.bet_steps = [10, 100, 1000, 10000]
+        self.bet_btns = [Button((22 + i * 64, 660, 58, 46), label, (50, 60, 90), 16)
+                         for i, label in enumerate(["+10", "+100", "+1K", "+10K"])]
+        self.bet_rect = pygame.Rect(280, 660, 150, 46)
+        self.btn_bet_all = Button((436, 660, 60, 46), "ALL", (150, 40, 40), 16)
+        self.btn_bet_clear = Button((502, 660, 76, 46), "CLEAR", (80, 70, 30), 16)
+        self.btn_higher = Button((960, 646, 134, 62), "HIGHER", (25, 120, 60), 22, "x1.9 IN 5 MIN")
+        self.btn_lower = Button((1104, 646, 134, 62), "LOWER", (160, 40, 45), 22, "x1.9 IN 5 MIN")
 
     def can_leave(self):
         return True
@@ -2852,6 +2980,39 @@ class Stocks:
     @property
     def stock(self):
         return self.m.stocks[self.sel]
+
+    ROW_H = 60
+
+    def row_rect(self, i):
+        return pygame.Rect(self.list_rect.x, self.list_rect.y + i * self.ROW_H - int(self.scroll), 306, self.ROW_H - 4)
+
+    def max_scroll(self):
+        return max(0, len(self.m.stocks) * self.ROW_H - 4 - self.list_rect.h)
+
+    def show_selected(self):
+        top = self.sel * self.ROW_H
+        if top < self.scroll_to:
+            self.scroll_to = top
+        elif top + self.ROW_H > self.scroll_to + self.list_rect.h:
+            self.scroll_to = top + self.ROW_H - self.list_rect.h
+        self.scroll_to = max(0, min(self.max_scroll(), self.scroll_to))
+
+    def place_bet(self, direction):
+        sym = self.stock["sym"]
+        amt = self.bet_amt
+        if amt <= 0:
+            self.say("CHOOSE HOW MUCH TO BET")
+        elif amt > self.app.balance:
+            self.say("NOT ENOUGH CHIPS FOR THAT BET")
+        elif len(self.m.bets) >= STOCK_BET_MAX:
+            self.say(f"YOU CAN ONLY HAVE {STOCK_BET_MAX} BETS RUNNING AT ONCE")
+        else:
+            self.app.balance -= amt
+            bet = self.m.place_bet(sym, direction, amt)
+            word = "HIGHER" if direction == "up" else "LOWER"
+            self.say(f"{money(amt)} ON {sym} {word} THAN ${bet['start']:,.2f} IN 5 MINUTES")
+            self.app.sfx("chip")
+            self.app.save()
 
     def say(self, text):
         self.message, self.msg_t = text, 3.5
@@ -2904,11 +3065,42 @@ class Stocks:
         self.app.save()
 
     def handle(self, e):
+        if e.type == pygame.MOUSEWHEEL:
+            if self.list_rect.collidepoint(pygame.mouse.get_pos()):
+                self.scroll_to = max(0, min(self.max_scroll(), self.scroll_to - e.y * self.ROW_H))
+            return
         if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-            for i, r in enumerate(self.rows):
+            if self.list_rect.collidepoint(e.pos):
+                for i in range(len(self.m.stocks)):
+                    if self.row_rect(i).collidepoint(e.pos):
+                        self.sel = i
+                        return
+                return
+            for i, r in enumerate(self.pos_tabs):
                 if r.collidepoint(e.pos):
-                    self.sel = i
+                    self.pos_tab = i
                     return
+            if self.pos_tab == 1:
+                for b, step in zip(self.bet_btns, self.bet_steps):
+                    if b.clicked(e.pos):
+                        self.bet_amt = min(self.app.balance, self.bet_amt + step)
+                        self.app.sfx("chip")
+                        return
+                if self.btn_bet_all.clicked(e.pos):
+                    self.bet_amt = self.app.balance
+                elif self.btn_bet_clear.clicked(e.pos):
+                    self.bet_amt = 0
+                elif self.btn_higher.clicked(e.pos):
+                    self.place_bet("up")
+                elif self.btn_lower.clicked(e.pos):
+                    self.place_bet("down")
+                for i, r in enumerate(self.tf_rects + self.news_tabs):
+                    if r.collidepoint(e.pos):
+                        if i < len(self.tf_rects):
+                            self.tf = i
+                        else:
+                            self.news_tab = i - len(self.tf_rects)
+                return
             for i, r in enumerate(self.tf_rects):
                 if r.collidepoint(e.pos):
                     self.tf = i
@@ -2932,8 +3124,15 @@ class Stocks:
         elif e.type == pygame.KEYDOWN:
             if e.key in (pygame.K_UP, pygame.K_w):
                 self.sel = (self.sel - 1) % len(self.m.stocks)
+                self.show_selected()
             elif e.key in (pygame.K_DOWN, pygame.K_s):
                 self.sel = (self.sel + 1) % len(self.m.stocks)
+                self.show_selected()
+            elif self.pos_tab == 1:
+                if e.unicode and e.unicode.isdigit():        # type a bet amount
+                    self.bet_amt = min(10 ** 12, self.bet_amt * 10 + int(e.unicode))
+                elif e.key == pygame.K_BACKSPACE:
+                    self.bet_amt //= 10
             elif e.unicode and e.unicode.isdigit():          # type a share count
                 self.qty = min(999999, self.qty * 10 + int(e.unicode))
             elif e.key == pygame.K_BACKSPACE:
@@ -2943,6 +3142,7 @@ class Stocks:
 
     def update(self, dt):
         self.msg_t = max(0.0, self.msg_t - dt)
+        self.scroll += (self.scroll_to - self.scroll) * min(1.0, dt * 14)
 
     def draw_chart(self, surf, mouse):
         st = self.stock
@@ -2995,6 +3195,17 @@ class Stocks:
                 draw_pill(surf, f"YOUR AVG ${avg:,.2f}", font(12, bold=True), (inner.x + 70, y - 12), (20, 20, 20),
                           (*GOLD, 230), None, pad=(8, 2))
 
+        for bet in self.m.bets:
+            if bet["sym"] == st["sym"] and lo < bet["start"] < hi:
+                y = inner.bottom - (bet["start"] - lo) / (hi - lo) * inner.h
+                c = (120, 190, 255)
+                for x in range(inner.x, inner.right, 10):
+                    pygame.draw.line(surf, c, (x, y), (min(x + 5, inner.right), y), 2)
+                left = max(0, int(bet["t1"] - time.time()))
+                draw_pill(surf, f"BET {'HIGHER' if bet['dir'] == 'up' else 'LOWER'} {money(bet['amount'])}  "
+                                f"{left // 60}:{left % 60:02d}", font(12, bold=True), (inner.right - 110, y - 12),
+                          (10, 20, 40), (*c, 230), None, pad=(8, 2))
+
         if inner.collidepoint(mouse):
             i = round((mouse[0] - inner.x) / inner.w * (len(data) - 1))
             v = data[i]
@@ -3011,28 +3222,42 @@ class Stocks:
         surf.blit(self.bg, (0, 0))
         n = TIMEFRAMES[self.tf][1]
 
-        # market list
-        for i, (r, st) in enumerate(zip(self.rows, self.m.stocks)):
+        # market list (scrolls - mouse wheel, or the up / down keys)
+        surf.set_clip(self.list_rect)
+        betting = {b["sym"] for b in self.m.bets}
+        for i, st in enumerate(self.m.stocks):
+            r = self.row_rect(i)
+            if r.bottom < self.list_rect.y or r.y > self.list_rect.bottom:
+                continue
             sel = i == self.sel
             self.panel(surf, r, 190 if sel else 120, GOLD if sel else (40, 50, 80))
-            pygame.draw.rect(surf, st["color"], (r.x + 6, r.y + 12, 5, r.h - 24), border_radius=3)
-            draw_text(surf, st["sym"], font(22, bold=True), WHITE, (r.x + 22, r.y + 24), anchor="midleft")
-            draw_text(surf, st["name"], font(12), (150, 150, 170), (r.x + 22, r.y + 48), anchor="midleft")
+            pygame.draw.rect(surf, st["color"], (r.x + 6, r.y + 10, 5, r.h - 20), border_radius=3)
+            draw_text(surf, st["sym"], font(18, bold=True), WHITE, (r.x + 20, r.y + 18), anchor="midleft")
+            draw_text(surf, st["name"], font(11), (150, 150, 170), (r.x + 20, r.y + 39), anchor="midleft")
             ch = pct_change(st["hist"], 3600)
             col = UP_COL if ch >= 0 else DOWN_COL
-            draw_text(surf, f"${st['price']:,.2f}", font(20, bold=True), WHITE, (r.right - 14, r.y + 24),
+            draw_text(surf, f"${st['price']:,.2f}", font(16, bold=True), WHITE, (r.right - 10, r.y + 18),
                       anchor="midright")
-            draw_text(surf, f"{ch:+.2f}%", font(14, bold=True), col, (r.right - 14, r.y + 48), anchor="midright")
-            spark = list(st["hist"])[-300:][::6]
+            draw_text(surf, f"{ch:+.2f}%", font(13, bold=True), col, (r.right - 10, r.y + 39), anchor="midright")
+            spark = list(st["hist"])[-300:][::10]
             if len(spark) > 1:
                 lo, hi = min(spark), max(spark)
                 rng = (hi - lo) or 1
-                pts = [(r.x + 22 + j / (len(spark) - 1) * 200, r.y + 76 - (v - lo) / rng * 14)
+                pts = [(r.x + 150 + j / (len(spark) - 1) * 60, r.y + 30 - (v - lo) / rng * 12 + 6)
                        for j, v in enumerate(spark)]
                 pygame.draw.lines(surf, UP_COL if spark[-1] >= spark[0] else DOWN_COL, False, pts, 2)
-            if st["sym"] in self.m.holdings:
-                draw_pill(surf, "OWNED", font(10, bold=True), (r.right - 40, r.y + 72), (20, 20, 20),
-                          (*GOLD, 255), None, pad=(6, 1))
+            tags = (["OWNED"] if st["sym"] in self.m.holdings else []) + (["BET"] if st["sym"] in betting else [])
+            for k, tag in enumerate(tags):
+                draw_pill(surf, tag, font(9, bold=True), (r.x + 160 + k * 38, r.y + 47), (20, 20, 20),
+                          (*(GOLD if tag == "OWNED" else (120, 190, 255)), 255), None, pad=(5, 1))
+        surf.set_clip(None)
+        if self.max_scroll():
+            track = pygame.Rect(self.list_rect.right - 12, self.list_rect.y, 6, self.list_rect.h)
+            pygame.draw.rect(surf, (25, 30, 50), track, border_radius=3)
+            frac = self.list_rect.h / (self.list_rect.h + self.max_scroll())
+            thumb_h = max(30, track.h * frac)
+            ty = track.y + (track.h - thumb_h) * (self.scroll / self.max_scroll())
+            pygame.draw.rect(surf, (110, 120, 160), (track.x, ty, 6, thumb_h), border_radius=3)
 
         # header
         st = self.stock
@@ -3064,14 +3289,46 @@ class Stocks:
             draw_pill(surf, self.message, font(16, bold=True), (self.chart.centerx, self.chart.y + 20), GOLD,
                       (0, 0, 0, 220), GOLD_DARK, pad=(14, 4))
 
-        # position box
+        # position box - or your 5-minute bets
         b = self.pos_box
         self.panel(surf, b, 150, (40, 50, 80))
-        draw_text(surf, f"YOUR {st['sym']} POSITION", font(15, bold=True), GOLD, (b.x + 16, b.y + 18),
-                  anchor="midleft")
+        for i, (r, label) in enumerate(zip(self.pos_tabs, [f"MY {st['sym']} SHARES", f"5-MIN BETS  ({len(self.m.bets)})"])):
+            on = i == self.pos_tab
+            if on:
+                pygame.draw.rect(surf, (40, 50, 80), r, border_radius=8)
+            draw_text(surf, label, font(14, bold=True), GOLD if on else (130, 130, 150), r.center)
         h = self.m.holdings.get(st["sym"])
         f, fb = font(15), font(15, bold=True)
-        if h:
+        if self.pos_tab == 1:
+            now = time.time()
+            bets = sorted(self.m.bets, key=lambda x: x["t1"])
+            for j, bet in enumerate(bets[:4]):
+                y = b.y + 50 + j * 23
+                left = max(0, int(bet["t1"] - now))
+                win = self.m.bet_winning(bet)
+                draw_arrow(surf, bet["dir"] == "up", (b.x + 22, y), 11, UP_COL if bet["dir"] == "up" else DOWN_COL)
+                draw_text(surf, f"{bet['sym']}  {money(bet['amount'])}", font(14, bold=True), WHITE, (b.x + 34, y),
+                          anchor="midleft")
+                draw_text(surf, f"from ${bet['start']:,.2f}", font(13), (160, 160, 180), (b.x + 170, y),
+                          anchor="midleft")
+                draw_text(surf, f"{left // 60}:{left % 60:02d}", font(14, bold=True), (200, 200, 220),
+                          (b.x + 316, y), anchor="midleft")
+                draw_text(surf, "WINNING" if win else "LOSING", font(13, bold=True), UP_COL if win else DOWN_COL,
+                          (b.right - 14, y), anchor="midright")
+            if len(bets) > 4:
+                draw_text(surf, f"+ {len(bets) - 4} more", font(12), (150, 150, 170), (b.x + 34, b.y + 142),
+                          anchor="midleft")
+            if not bets:
+                draw_text(surf, f"Will {st['sym']} be HIGHER or LOWER in 5 minutes?", f, (190, 190, 210),
+                          (b.x + 16, b.y + 56), anchor="midleft")
+                draw_text(surf, "Pick an amount below, then press HIGHER or LOWER.", f, (150, 150, 170),
+                          (b.x + 16, b.y + 82), anchor="midleft")
+                draw_text(surf, "Right pays x1.9. Bets finish even if the game is closed.", f, (150, 150, 170),
+                          (b.x + 16, b.y + 106), anchor="midleft")
+            else:
+                total = sum(x["amount"] for x in bets)
+                draw_text(surf, f"ON THE LINE {money(total)}", fb, WHITE, (b.right - 16, b.y + 143), anchor="midright")
+        elif h:
             value = self.m.position_value(st["sym"])
             pnl = int(round(value - h["cost"]))
             pc = pnl / h["cost"] * 100 if h["cost"] else 0
@@ -3092,11 +3349,12 @@ class Stocks:
                       anchor="midleft")
             draw_text(surf, "Choose a number of shares below and press BUY.", f, (150, 150, 170),
                       (b.x + 16, b.y + 80), anchor="midleft")
-        pygame.draw.line(surf, (40, 50, 80), (b.x + 12, b.y + 126), (b.right - 12, b.y + 126))
         tv, tc = self.m.total_value(), self.m.total_cost()
         tp = int(round(tv - tc))
-        draw_text(surf, f"PORTFOLIO  {money(int(round(tv)))}", fb, WHITE, (b.x + 16, b.y + 143), anchor="midleft")
-        if self.m.holdings:
+        if self.pos_tab == 0:
+            pygame.draw.line(surf, (40, 50, 80), (b.x + 12, b.y + 126), (b.right - 12, b.y + 126))
+            draw_text(surf, f"PORTFOLIO  {money(int(round(tv)))}", fb, WHITE, (b.x + 16, b.y + 143), anchor="midleft")
+        if self.m.holdings and self.pos_tab == 0:
             draw_text(surf, f"{'+' if tp >= 0 else '-'}{money(abs(tp))} unrealized", fb,
                       UP_COL if tp >= 0 else DOWN_COL, (b.right - 16, b.y + 143), anchor="midright")
 
@@ -3141,6 +3399,26 @@ class Stocks:
         # bottom bar
         pygame.draw.rect(surf, (8, 10, 20), (0, 630, W, 90))
         pygame.draw.line(surf, GOLD_DARK, (0, 630), (W, 630), 2)
+        if self.pos_tab == 1:                      # 5-minute bet ticket
+            self.bet_amt = min(self.bet_amt, self.app.balance)
+            draw_text(surf, "BET AMOUNT", font(11, bold=True), (150, 160, 190), (22, 646), anchor="midleft")
+            draw_text(surf, "type a number or use the buttons", font(11), (110, 120, 150), (110, 646), anchor="midleft")
+            for b in self.bet_btns:
+                b.draw(surf, mouse)
+            pygame.draw.rect(surf, (4, 6, 14), self.bet_rect, border_radius=10)
+            pygame.draw.rect(surf, GOLD, self.bet_rect, width=2, border_radius=10)
+            draw_text(surf, money(self.bet_amt), fit_font(money(self.bet_amt), 22, 136), WHITE, self.bet_rect.center)
+            self.btn_bet_all.draw(surf, mouse, self.app.balance > 0)
+            self.btn_bet_clear.draw(surf, mouse, self.bet_amt > 0)
+            ok = 0 < self.bet_amt <= self.app.balance and len(self.m.bets) < STOCK_BET_MAX
+            draw_text(surf, f"Will {st['sym']} be above or below ${st['price']:,.2f} in 5 minutes?", font(14, bold=True),
+                      (210, 215, 235), (592, 666), anchor="midleft")
+            draw_text(surf, f"Right pays {money(int(self.bet_amt * STOCK_BET_PAY))}" if self.bet_amt else
+                      "Right pays x1.9 your bet", font(13), (150, 200, 160), (592, 690), anchor="midleft")
+            self.btn_higher.draw(surf, mouse, ok)
+            self.btn_lower.draw(surf, mouse, ok)
+            self.app.draw_top_bar(surf, "STOCKS", lobby=True)
+            return
         sym = st["sym"]
         draw_text(surf, "SHARES", font(11, bold=True), (150, 160, 190), (22, 646), anchor="midleft")
         draw_text(surf, "type a number or use the buttons", font(11), (110, 120, 150), (142, 646), anchor="midleft")
@@ -10824,7 +11102,7 @@ CUP_LEVELS = [   # name, cups, moves, first move time, last move time, payout
     ("EASY", 3, 12, 0.42, 0.26, 1.3),
     ("MEDIUM", 3, 18, 0.30, 0.15, 2.0),
     ("HARD", 4, 26, 0.22, 0.09, 3.5),
-    ("EXTREME", 5, 100, 0.75, 0.065, 100),
+    ("EXTREME", 5, 100, 0.75, 0.065, 20),
 ]
 CUP_EXTREME = 3                  # index of EXTREME: slow at first, then the cups fly all over the table
 CUP_TRICKS = [   # chance of a fake-out, a three-cup spin, and (4 cups only) two swaps at once
@@ -14891,7 +15169,7 @@ HELP = {
         ("b", "MEDIUM - 3 cups, 18 fast moves. Pays x2."),
         ("b", "HARD - 4 cups, 26 lightning-fast moves. Pays x3.5."),
         ("b", "EXTREME - 5 cups and 100 moves. It starts slow and easy... but it never stops speeding up, and "
-              "by the end the cups are flying all over the table. Pays x100!"),
+              "by the end the cups are flying all over the table. Pays x20!"),
         ("h", "Watch out for tricks"),
         ("b", "FAKE-OUTS - two cups start to swap, meet in the middle... and go back where they were."),
         ("b", "SPINS - all three cups move at once, each one sliding to a different spot."),
@@ -14936,7 +15214,7 @@ HELP = {
     ]),
     "stocks": ("STOCKS", [
         ("h", "What is a stock?"),
-        ("p", "A share of stock is a tiny piece of a company. The six companies here are made up, and all the "
+        ("p", "A share of stock is a tiny piece of a company. The 20 companies here are made up, and all the "
               "money is play money, but it works the same way as the real thing."),
         ("p", "A share's price changes all the time. It tends to go up when the company does well and down when "
               "it does badly - but a lot of the moves are just random ups and downs."),
@@ -14948,8 +15226,8 @@ HELP = {
         ("p", "Nothing happens to your money until you sell. Until then it's \"unrealized\" - "
               "just what it WOULD be worth if you sold right now."),
         ("h", "Reading the screen"),
-        ("b", "Left side - all six companies. Each shows its price and how much it moved in the last hour. "
-              "Click one to look at it."),
+        ("b", "Left side - all 20 companies (scroll with the mouse wheel or the up / down keys). Each shows its "
+              "price and how much it moved in the last hour. Click one to look at it."),
         ("b", "Chart - the price over time. The 1M / 5M / 30M / 1H buttons change how far back it goes. "
               "Hover over the chart to see past prices."),
         ("b", "Dashed gold line - the average price you paid. Above it you're making money, below it you're losing."),
@@ -14972,6 +15250,16 @@ HELP = {
         ("p", "Every so often a BIG event happens - a market crash, a boom, a rocket exploding, cheese found on the "
               "Moon... These can move a stock 15% to 90% and pop up as a notification wherever you are in the game. "
               "They show in gold in the news box."),
+        ("p", "Very rarely there's a MEGA EVENT - a company getting bought for a fortune (3x to 6x its price!), "
+              "going nearly bankrupt (down 60-85%), or the whole market crashing or booming."),
+        ("h", "5-minute bets"),
+        ("p", "Open the 5-MIN BETS tab (next to MY SHARES). Choose an amount, then bet whether the stock you're "
+              "looking at will be HIGHER or LOWER than it is right now, 5 minutes from now."),
+        ("b", "Right pays x1.9 your bet. If the price ends exactly where it started, you get your bet back."),
+        ("b", "You can have up to 10 bets running. Each one shows a countdown and whether it's winning right now, "
+              "and a blue line on the chart marks its starting price."),
+        ("b", "Bets finish even if you leave the stocks screen or close the game - a notification tells you how "
+              "you did."),
         ("h", "It never stops"),
         ("p", "The market keeps moving while you play the other games, and it even catches up (up to 6 hours) for "
               "time the game was closed. Once you own shares, the box at the top of every screen shows what they're "
@@ -15249,7 +15537,7 @@ class App:
         self.effects.toast("GAME RESET", f"All data deleted - you're starting over with {money(START_BALANCE)}")
 
     def net_worth(self):
-        return self.balance + self.market.total_value()
+        return self.balance + self.market.total_value() + sum(b["amount"] for b in self.market.bets)
 
     # ---- stats, achievements, daily bonus --------------------------------
     def record(self, game, stake, returned):
@@ -15717,6 +16005,21 @@ class App:
             for ev in self.market.pop_alerts():
                 self.effects.toast(ev["title"], ev["sub"], ev["kind"])
                 self.sfx("alert")
+            for bet in self.market.pop_settled():
+                self.balance += bet["payout"]
+                self.record("stockbet", bet["amount"], bet["payout"])
+                word = "HIGHER" if bet["dir"] == "up" else "LOWER"
+                move = f"{bet['sym']} ${bet['start']:,.2f} -> ${bet['end']:,.2f}"
+                if bet["result"] == "win":
+                    self.effects.toast("STOCK BET WON!", f"{word} was right ({move}) - you won {money(bet['payout'])}")
+                    self.float_text(f"+{money(bet['payout'] - bet['amount'])}", (80, 230, 110))
+                    self.sfx("win")
+                elif bet["result"] == "push":
+                    self.effects.toast("STOCK BET - NO CHANGE", f"{move} - your {money(bet['amount'])} is returned")
+                else:
+                    self.effects.toast("STOCK BET LOST", f"You said {word} ({move}) - you lost {money(bet['amount'])}")
+                    self.sfx("lose")
+                self.save()
             self.lottery.check()
             self.yesno.check()
             self.worth_check -= dt

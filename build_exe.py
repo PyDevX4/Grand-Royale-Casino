@@ -34,7 +34,7 @@ ICON = "icon.ico"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # What changed - shown on the GitHub release page. Edit before publishing if you like.
-NOTES = "New: EXTREME cups - 5 cups, 100 moves, pays x100. It starts slow, but by the end the cups are flying all over the table. The game installs this update by itself the next time you open it."
+NOTES = "14 new stocks (20 in total), rare MEGA EVENTS that can multiply or crash a stock, 5-minute HIGHER/LOWER stock bets (pays x1.9), and EXTREME cups now pays x20. The game installs this update by itself the next time you open it."
 DOWNLOAD_NOTE = "\n".join([
     "---",
     "**To play: download the .zip below.** Unzip it and run \"Grand Royale Casino.exe\" inside.",
