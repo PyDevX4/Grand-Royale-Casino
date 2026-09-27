@@ -14072,6 +14072,227 @@ def art_pusher(w, h):
 
 
 # --------------------------------------------------------------------------
+# Coin Flip - heads or tails, double your bet
+# --------------------------------------------------------------------------
+FLIP_EDGE = 0.02                 # once in a while the coin lands on its edge - the house wins that one
+FLIP_TIME = 1.7
+FLIP_R = 90                      # coin radius
+FLIP_Y = 380                     # where the coin lands
+
+
+def make_coin_face(kind, r):
+    k = 2
+    R = r * k
+    s = pygame.Surface((2 * R, 2 * R), pygame.SRCALPHA)
+    c = (R, R)
+    pygame.draw.circle(s, (150, 100, 15), c, R)
+    for i in range(20):
+        t = i / 19
+        pygame.draw.circle(s, lerp_col((225, 170, 40), (255, 225, 110), t), (R - t * R * 0.15, R - t * R * 0.15),
+                           int(R * 0.94 * (1 - t * 0.25)))
+    pygame.draw.circle(s, (190, 135, 25), c, int(R * 0.80), 3 * k)
+    for i in range(48):                                  # ridged rim
+        a = i / 48 * 2 * math.pi
+        pygame.draw.line(s, (170, 115, 20), (R + math.cos(a) * R * 0.9, R + math.sin(a) * R * 0.9),
+                         (R + math.cos(a) * R * 0.99, R + math.sin(a) * R * 0.99), 2 * k)
+    dark = (125, 80, 10)
+    if kind == "heads":                                  # a crown
+        w, h = R * 0.9, R * 0.5
+        x0, y0 = R - w / 2, R - h * 0.55
+        pts = [(x0, y0 + h), (x0, y0 + h * 0.2), (x0 + w * 0.25, y0 + h * 0.55), (x0 + w * 0.5, y0),
+               (x0 + w * 0.75, y0 + h * 0.55), (x0 + w, y0 + h * 0.2), (x0 + w, y0 + h)]
+        pygame.draw.polygon(s, dark, pts)
+        for px in (x0, x0 + w * 0.5, x0 + w):
+            pygame.draw.circle(s, dark, (px, y0 + (0 if px == x0 + w * 0.5 else h * 0.2) - 6 * k), 7 * k)
+        draw_text(s, "HEADS", font(R * 0.24, bold=True, serif=True), dark, (R, R + R * 0.48))
+    else:                                                # a big star and TAILS
+        pts = []
+        for i in range(10):
+            a = -math.pi / 2 + i * math.pi / 5
+            rr = R * (0.42 if i % 2 == 0 else 0.18)
+            pts.append((R + math.cos(a) * rr, R - R * 0.08 + math.sin(a) * rr))
+        pygame.draw.polygon(s, dark, pts)
+        draw_text(s, "TAILS", font(R * 0.24, bold=True, serif=True), dark, (R, R + R * 0.52))
+    return pygame.transform.smoothscale(s, (2 * r, 2 * r))
+
+
+class CoinFlip(StakeGame):
+    key = "coinflip"
+
+    def __init__(self, app):
+        super().__init__(app, ((22, 13, 8), (90, 60, 35)))
+        self.bg = felt_table((12, 60, 34), (28, 105, 60))
+        self.faces = {k: make_coin_face(k, FLIP_R) for k in ("heads", "tails")}
+        self.state = "betting"          # betting, flipping, result
+        self.pick = None
+        self.result = None
+        self.stake = 0
+        self.t = 0.0
+        self.flip_t = 0.0
+        self.end_angle = 0.0
+        self.history = deque(maxlen=16)
+        self.streak = 0
+        self.message = "SET YOUR BET, THEN CALL IT: HEADS OR TAILS"
+        self.btn_heads = Button((965, 646, 130, 62), "HEADS", (190, 140, 30), 22, "H")
+        self.btn_tails = Button((1105, 646, 130, 62), "TAILS", (80, 95, 130), 22, "T")
+
+    def busy(self):
+        return self.state == "flipping"
+
+    def outstanding_bets(self):
+        return self.stake if self.state == "flipping" else 0
+
+    def flip(self, side):
+        if self.busy():
+            return
+        stake = self.take_bet()
+        if not stake:
+            return
+        self.stake, self.pick = stake, side
+        r = random.random()
+        self.result = "edge" if r < FLIP_EDGE else ("heads" if r < FLIP_EDGE + (1 - FLIP_EDGE) / 2 else "tails")
+        turns = random.randint(9, 12)                    # half-turns: even = heads up, odd = tails up
+        if (turns % 2 == 0) != (self.result == "heads"):
+            turns += 1
+        self.end_angle = turns * math.pi + (math.pi / 2 if self.result == "edge" else 0)
+        self.state = "flipping"
+        self.flip_t = 0.0
+        self.message = f"YOU CALLED {side.upper()}..."
+        self.app.sfx("chip")
+
+    def settle(self):
+        self.state = "result"
+        self.history.append(self.result)
+        if self.result == self.pick:
+            self.streak += 1
+            self.finish(self.stake, self.stake * 2, f"{self.result.upper()}!  YOU WIN {money(self.stake * 2)}")
+            self.app.effects.burst(W / 2, FLIP_Y - 40, 40, [(255, 220, 90), (255, 255, 255)])
+        else:
+            self.streak = 0
+            lose = ("IT LANDED ON ITS EDGE!  THE HOUSE WINS" if self.result == "edge"
+                    else f"{self.result.upper()}  -  YOU LOSE {money(self.stake)}")
+            self.finish(self.stake, 0, lose_msg=lose)
+        self.stake = 0
+
+    def handle(self, e):
+        if e.type == pygame.KEYDOWN:
+            if e.key == pygame.K_h:
+                self.flip("heads")
+            elif e.key == pygame.K_t:
+                self.flip("tails")
+        elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            if self.chip_click(e.pos):
+                return
+            if self.btn_clear.clicked(e.pos):
+                self.bet = 0
+            elif self.btn_heads.clicked(e.pos, not self.busy()):
+                self.flip("heads")
+            elif self.btn_tails.clicked(e.pos, not self.busy()):
+                self.flip("tails")
+
+    def update(self, dt):
+        self.t += dt
+        if self.state == "flipping":
+            self.flip_t += dt
+            if self.flip_t >= FLIP_TIME:
+                self.settle()
+
+    def coin_pose(self):
+        """Height above the table, and how far the coin has turned."""
+        if self.state != "flipping":
+            if self.result is None:
+                return 0.0, 0.0
+            return 0.0, self.end_angle
+        p = min(1.0, self.flip_t / FLIP_TIME)
+        height = math.sin(math.pi * min(1.0, p / 0.9)) * 235 if p < 0.9 else 0.0
+        if p >= 0.9:                                     # a little bounce as it lands
+            height = abs(math.sin((p - 0.9) / 0.1 * math.pi)) * 18
+        ease = 1 - (1 - p) ** 2.2
+        return height, self.end_angle * ease
+
+    def draw_coin(self, surf):
+        height, ang = self.coin_pose()
+        x, y = W / 2, FLIP_Y - height
+        # shadow on the table
+        sh = max(0.35, 1 - height / 400)
+        shadow = pygame.Surface((int(2 * FLIP_R * sh) + 4, int(40 * sh) + 4), pygame.SRCALPHA)
+        pygame.draw.ellipse(shadow, (0, 0, 0, int(110 * sh)), shadow.get_rect())
+        surf.blit(shadow, shadow.get_rect(center=(W / 2, FLIP_Y + FLIP_R * 0.9)))
+        c = math.cos(ang)
+        thin = abs(c)
+        if self.state != "flipping" and self.result == "edge":
+            wob = math.sin(self.t * 9) * 3
+            rim = pygame.Rect(0, 0, 26, 2 * FLIP_R)
+            rim.center = (x + wob, y)
+            pygame.draw.rect(surf, (150, 100, 15), rim, border_radius=12)
+            for k in range(rim.y + 6, rim.bottom - 4, 8):
+                pygame.draw.line(surf, (210, 160, 40), (rim.x + 3, k), (rim.right - 3, k), 3)
+            return
+        face = self.faces["heads" if c >= 0 else "tails"]
+        h = max(6, int(2 * FLIP_R * thin))
+        rim_h = int(10 * (1 - thin)) + 3
+        pygame.draw.ellipse(surf, (120, 80, 10), (x - FLIP_R, y - h / 2 + rim_h, 2 * FLIP_R, h))
+        img = pygame.transform.smoothscale(face, (2 * FLIP_R, h))
+        surf.blit(img, img.get_rect(center=(x, y)))
+
+    def draw(self, surf):
+        mouse = pygame.mouse.get_pos()
+        surf.blit(self.bg, (0, 0))
+        draw_text(surf, "COIN FLIP", font(40, bold=True, serif=True), GOLD, (W / 2, 104), shadow=(0, 0, 0))
+        draw_text(surf, "CALL IT RIGHT AND DOUBLE YOUR BET", font(16, bold=True), (200, 225, 205), (W / 2, 142))
+        self.draw_coin(surf)
+        # your call and the payout
+        left = pygame.Rect(40, 170, 250, 200)
+        soft_panel(surf, left, 150, (90, 140, 100))
+        draw_text(surf, "YOUR CALL", font(15, bold=True), GOLD, (left.centerx, left.y + 26))
+        call = self.pick.upper() if self.pick and self.state != "betting" else "-"
+        draw_text(surf, call, font(34, bold=True), WHITE, (left.centerx, left.y + 72))
+        draw_text(surf, f"BET {money(self.stake or self.bet)}", font(16, bold=True), (200, 200, 210),
+                  (left.centerx, left.y + 118))
+        draw_text(surf, f"WIN PAYS {money(2 * (self.stake or self.bet))}", font(16, bold=True), (120, 230, 140),
+                  (left.centerx, left.y + 146))
+        draw_text(surf, f"STREAK: {self.streak}", font(14, bold=True), GOLD if self.streak else (160, 160, 170),
+                  (left.centerx, left.y + 178))
+        # history
+        right = pygame.Rect(W - 290, 170, 250, 200)
+        soft_panel(surf, right, 150, (90, 140, 100))
+        draw_text(surf, "LAST FLIPS", font(15, bold=True), GOLD, (right.centerx, right.y + 26))
+        for i, res in enumerate(reversed(self.history)):
+            cx = right.x + 34 + (i % 6) * 36
+            cy = right.y + 66 + (i // 6) * 40
+            col = (235, 185, 50) if res == "heads" else ((150, 160, 190) if res == "tails" else (230, 80, 80))
+            pygame.draw.circle(surf, col, (cx, cy), 15)
+            draw_text(surf, {"heads": "H", "tails": "T", "edge": "E"}[res], font(14, bold=True), (40, 30, 10), (cx, cy))
+        if not self.history:
+            draw_text(surf, "No flips yet", font(14), (170, 180, 170), (right.centerx, right.y + 90))
+        if self.state == "result":
+            big = {"heads": "HEADS!", "tails": "TAILS!", "edge": "ON ITS EDGE!"}[self.result]
+            won = self.result == self.pick
+            draw_pill(surf, big, font(34, bold=True), (W / 2, 548), (120, 240, 140) if won else (250, 140, 140),
+                      (0, 0, 0, 200), GOLD if won else (150, 60, 60), pad=(24, 6))
+        if self.message:
+            draw_pill(surf, self.message, font(16, bold=True), (640, 604), GOLD, (0, 0, 0, 210), GOLD_DARK, pad=(14, 4))
+        self.draw_bottom(surf, mouse, self.btn_heads, not self.busy() and 0 < self.bet <= self.app.balance)
+        self.btn_tails.draw(surf, mouse, not self.busy() and 0 < self.bet <= self.app.balance)
+        self.app.draw_top_bar(surf, "COIN FLIP", lobby=True, lobby_enabled=self.can_leave())
+
+
+def art_coinflip(w, h):
+    k = 2
+    s = pygame.Surface((w * k, h * k), pygame.SRCALPHA)
+    for y in range(h * k):
+        pygame.draw.line(s, lerp_col((25, 100, 60), (8, 40, 24), y / (h * k)), (0, y), (w * k, y))
+    r = int(h * k * 0.33)
+    heads = make_coin_face("heads", r)
+    tails = pygame.transform.smoothscale(make_coin_face("tails", r), (2 * r, int(2 * r * 0.35)))
+    s.blit(heads, heads.get_rect(center=(w * k * 0.36, h * k * 0.5)))
+    s.blit(tails, tails.get_rect(center=(w * k * 0.68, h * k * 0.3)))
+    draw_text(s, "x2", font(h * k * 0.3, bold=True, serif=True), (255, 225, 120), (w * k * 0.78, h * k * 0.68),
+              shadow=(0, 0, 0))
+    return pygame.transform.smoothscale(s, (w, h))
+
+
+# --------------------------------------------------------------------------
 # Lobby / menu
 # --------------------------------------------------------------------------
 def art_blackjack(assets, w, h):
@@ -14540,6 +14761,7 @@ GAME_INFO = {       # scene -> (title, one-line description)
     "sicbo": ("SIC BO", "Three dice and dozens of ways to bet."),
     "wheel": ("WHEEL", "Spin for a multiplier from x0.1 to x5."),
     "cups": ("CUPS", "Follow the ball as the cups get shuffled."),
+    "coinflip": ("COIN FLIP", "Heads or tails. Call it right and double your bet."),
     "pusher": ("CHIP PUSHER", "Drop chips, push them over the edge. Just like the arcade!"),
     "slots": ("SLOTS", "Line up the symbols on 5 paylines."),
     "rocket": ("ROCKET", "Cash out before the rocket explodes!"),
@@ -14558,7 +14780,7 @@ GAME_INFO = {       # scene -> (title, one-line description)
 }
 NON_GAMES = {"counting"}        # lobby entries that aren't betting games (no stats, not needed for Grand Tour)
 CATEGORIES = [("CARDS", ["blackjack", "poker", "baccarat", "videopoker", "bus", "dragontiger"]),
-              ("TABLE & DICE", ["roulette", "craps", "sicbo", "wheel", "cups"]),
+              ("TABLE & DICE", ["roulette", "craps", "sicbo", "wheel", "cups", "coinflip"]),
               ("INSTANT WIN", ["slots", "rocket", "plinko", "mines", "scratch", "keno"]),
               ("ARCADE", ["crossy", "pinball", "deepdive", "pusher"]),
               ("SPECIAL", ["yesno", "horses", "stocks", "lottery"]),
@@ -14589,7 +14811,7 @@ class Menu:
             "stocks": lambda: art_stocks(aw, ah), "lottery": lambda: art_lottery(aw, ah),
             "counting": lambda: art_counting(a, aw, ah), "pinball": lambda: art_pinball(aw, ah),
             "crossy": lambda: art_crossy(aw, ah), "cups": lambda: art_cups(aw, ah),
-            "pusher": lambda: art_pusher(aw, ah), "yesno": lambda: art_yesno(aw, ah),
+            "pusher": lambda: art_pusher(aw, ah), "coinflip": lambda: art_coinflip(aw, ah), "yesno": lambda: art_yesno(aw, ah),
         }
         self.art = {}
         for key, make in makers.items():
@@ -15561,6 +15783,16 @@ HELP = {
         ("b", "Blackjack pays 3 to 2 and the dealer stands on all 17s. (Splitting isn't available at the "
               "multiplayer table.)"),
     ]),
+    "coinflip": ("COIN FLIP", [
+        ("h", "The simplest game in the casino"),
+        ("b", "Click chips to set your bet."),
+        ("b", "Press HEADS (H key) or TAILS (T key) - the coin flips right away."),
+        ("b", "Call it right and you get double your bet back."),
+        ("x", "Bet $100 on HEADS, it lands HEADS  ->  you get $200."),
+        ("h", "Watch out"),
+        ("p", "Once in a while (2 flips in 100) the coin lands standing on its edge. Nobody called that, so the "
+              "house wins those."),
+    ]),
     "pusher": ("CHIP PUSHER", [
         ("h", "Just like the arcade"),
         ("p", "The table is covered in chips, and a pusher slides back and forth shoving them towards the front. "
@@ -15903,7 +16135,7 @@ class App:
                        "crossy": Crossy(self), "yesno": self.yesno, "cups": Cups(self),
                        "netpoker": NetPoker(self), "netbj": NetBlackjack(self), "online": Online(self),
                        "settings": Settings(self), "title": Title(self),
-                       "pusher": Pusher(self, self.saved.get("pusher"))}
+                       "pusher": Pusher(self, self.saved.get("pusher")), "coinflip": CoinFlip(self)}
         self.games = list(self.scenes.values())
         self.profile = ProfileOverlay(self)
         self.scene = "title"            # the game opens on the main menu
