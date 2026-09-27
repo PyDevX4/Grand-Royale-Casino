@@ -10820,10 +10820,15 @@ def art_yesno(w, h):
 # --------------------------------------------------------------------------
 # Cups - follow the ball while the cups are shuffled
 # --------------------------------------------------------------------------
-CUP_LEVELS = [   # name, cups, swaps, first swap time, last swap time, payout
-    ("EASY", 3, 7, 0.55, 0.38, 1.3),
-    ("MEDIUM", 3, 12, 0.40, 0.20, 2.0),
-    ("HARD", 4, 18, 0.30, 0.12, 3.5),
+CUP_LEVELS = [   # name, cups, moves, first move time, last move time, payout
+    ("EASY", 3, 12, 0.42, 0.26, 1.3),
+    ("MEDIUM", 3, 18, 0.30, 0.15, 2.0),
+    ("HARD", 4, 26, 0.22, 0.09, 3.5),
+]
+CUP_TRICKS = [   # chance of a fake-out, a three-cup spin, and (4 cups only) two swaps at once
+    (0.15, 0.10, 0.0),
+    (0.25, 0.25, 0.0),
+    (0.25, 0.20, 0.35),
 ]
 CUP_Y = 430              # where the cups sit on the table
 CUP_LIFT = 110
@@ -10867,7 +10872,7 @@ class Cups(StakeGame):
         self.slot_of = [0, 1, 2]    # cup id -> slot it's standing in
         self.ball = 0               # which cup id hides the ball
         self.swaps = []
-        self.swap = None            # (cup a, cup b, from slot a, from slot b, time, length)
+        self.swap = None            # the move in progress: {"paths": {cup: (from, to, arc)}, "t", "len", "fake"}
         self.done_swaps = 0
         self.picked = None
         self.lift = {}              # cup id -> how far it's lifted (0..1)
@@ -10895,13 +10900,14 @@ class Cups(StakeGame):
     def cup_pos(self, cup):
         """Screen x, y of a cup's rim, following any swap in progress."""
         s = self.swap
-        if s and cup in (s[0], s[1]):
-            k = min(1.0, s[4] / s[5])
+        if s and cup in s["paths"]:
+            fs, ts, arc = s["paths"][cup]
+            k = min(1.0, s["t"] / s["len"])
             k = k * k * (3 - 2 * k)                         # ease in and out
-            fa, fb = (s[2], s[3]) if cup == s[0] else (s[3], s[2])
-            x = self.slot_x(fa) + (self.slot_x(fb) - self.slot_x(fa)) * k
-            y = CUP_Y + math.sin(math.pi * k) * (-46 if cup == s[0] else 34)   # one goes behind, one in front
-            return x, y
+            lift = math.sin(math.pi * k)
+            f = 0.5 * lift if s["fake"] else k              # a fake-out meets in the middle, then goes back
+            x = self.slot_x(fs) + (self.slot_x(ts) - self.slot_x(fs)) * f
+            return x, CUP_Y + lift * arc
         return self.slot_x(self.slot_of[cup]), CUP_Y
 
     def busy(self):
@@ -10927,16 +10933,25 @@ class Cups(StakeGame):
         self.reset_cups()
         _, n, count, _, _, _ = CUP_LEVELS[self.level]
         self.ball = random.randrange(n)
-        self.swaps = []
-        for _ in range(count):
-            a, b = random.sample(range(n), 2)
-            self.swaps.append((a, b))                         # slots to swap
+        self.swaps = [self.make_move(n) for _ in range(count)]
         self.done_swaps = 0
         self.picked = None
         self.state = "show"
         self.timer = 0.0
         self.message = "WATCH THE BALL..."
         self.app.sfx("chip")
+
+    def make_move(self, n):
+        """One shuffle move: which slot each moving cup goes to, and whether it's a fake-out."""
+        fake_p, spin_p, double_p = CUP_TRICKS[self.level]
+        if n == 4 and random.random() < double_p:
+            a, b, c, d = random.sample(range(4), 4)
+            return {"map": {a: b, b: a, c: d, d: c}, "fake": False}
+        if random.random() < spin_p:
+            a, b, c = random.sample(range(n), 3)
+            return {"map": {a: b, b: c, c: a}, "fake": False}
+        a, b = random.sample(range(n), 2)
+        return {"map": {a: b, b: a}, "fake": random.random() < fake_p}
 
     def next_swap(self):
         name, n, count, t0, t1, _ = CUP_LEVELS[self.level]
@@ -10945,11 +10960,15 @@ class Cups(StakeGame):
             self.state = "pick"
             self.message = "WHERE'S THE BALL?  CLICK A CUP" + (" (OR PRESS 1-4)" if n == 4 else " (OR PRESS 1-3)")
             return
-        sa, sb = self.swaps[self.done_swaps]
-        a = self.slot_of.index(sa)
-        b = self.slot_of.index(sb)
+        mv = self.swaps[self.done_swaps]
+        paths = {}
+        for fs, ts in mv["map"].items():
+            cup = self.slot_of.index(fs)
+            dist = abs(ts - fs)
+            arc = -(30 + 14 * dist) if ts > fs else 22 + 10 * dist      # right-movers pass behind, left-movers in front
+            paths[cup] = (fs, ts, arc)
         length = t0 + (t1 - t0) * self.done_swaps / max(1, count - 1)        # faster and faster
-        self.swap = [a, b, sa, sb, 0.0, length]
+        self.swap = {"paths": paths, "t": 0.0, "len": length, "fake": mv["fake"]}
         self.app.sfx("card")
 
     def pick(self, cup):
@@ -11025,10 +11044,11 @@ class Cups(StakeGame):
                 self.state = "shuffle"
                 self.next_swap()
         elif self.state == "shuffle" and self.swap:
-            self.swap[4] += dt
-            if self.swap[4] >= self.swap[5]:
-                a, b, sa, sb = self.swap[:4]
-                self.slot_of[a], self.slot_of[b] = sb, sa
+            self.swap["t"] += dt
+            if self.swap["t"] >= self.swap["len"]:
+                if not self.swap["fake"]:
+                    for cup, (fs, ts, _) in self.swap["paths"].items():
+                        self.slot_of[cup] = ts
                 self.done_swaps += 1
                 self.next_swap()
         elif self.state == "reveal":
@@ -14841,9 +14861,13 @@ HELP = {
         ("b", "The ball is shown under its cup, then the cups start swapping places - faster and faster."),
         ("b", "When they stop, click a cup (or press 1, 2, 3 or 4 - the numbers under the cups)."),
         ("h", "Difficulties"),
-        ("b", "EASY - 3 cups, 7 slow swaps. Pays x1.3."),
-        ("b", "MEDIUM - 3 cups, 12 quicker swaps. Pays x2."),
-        ("b", "HARD - 4 cups, 18 lightning-fast swaps. Pays x3.5."),
+        ("b", "EASY - 3 cups, 12 moves. Pays x1.3."),
+        ("b", "MEDIUM - 3 cups, 18 fast moves. Pays x2."),
+        ("b", "HARD - 4 cups, 26 lightning-fast moves. Pays x3.5."),
+        ("h", "Watch out for tricks"),
+        ("b", "FAKE-OUTS - two cups start to swap, meet in the middle... and go back where they were."),
+        ("b", "SPINS - all three cups move at once, each one sliding to a different spot."),
+        ("b", "DOUBLE SWAPS (hard) - two pairs of cups swap at the same time."),
         ("x", "Bet $100 on HARD and find the ball  ->  you get $350 back."),
         ("p", "Tip: pick one cup with your eyes and never look away from it! Find the ball on HARD 3 times in a "
               "row for the Eagle Eye trophy."),
