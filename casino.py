@@ -13668,6 +13668,410 @@ class Title:
 
 
 # --------------------------------------------------------------------------
+# Chip Pusher - like the coin pushers at the arcade, but with casino chips
+# --------------------------------------------------------------------------
+CP_R = 20                         # chip radius on the table
+CP_LEFT, CP_RIGHT = 330, 950      # table edges
+CP_BACK, CP_FRONT = 96, 556       # the pusher's wall, and the edge you win chips over
+CP_PUSH_MIN, CP_PUSH_AMP = 40, 112  # how far in front of the back wall the pusher's face goes
+CP_PERIOD = 3.2                   # seconds for the pusher to go out and back
+CP_DRAIN = 280                    # the front this-many pixels of each side are open drains (chips lost) - tuned so it pays back ~93%
+CP_START = 110                    # chips on the table when the machine is new
+CP_GOLD_MULT = 5
+CP_BONUS = [("gold", 0.04), ("shower", 0.015), ("walls", 0.02)]   # chance per drop
+CP_WALL_TIME = 15.0
+CP_DROP_GAP = 0.22                # fastest you can drop
+
+
+class Pusher(StakeGame):
+    key = "pusher"
+
+    def __init__(self, app, state=None):
+        super().__init__(app, ((20, 12, 8), (110, 80, 40)))
+        self.bg = self.make_bg()
+        self.t = 0.0
+        self.phase = 0.0
+        self.chips = []             # [x, y, value, gold]
+        self.falling = []           # chips going over the front edge or into a drain: [x, y, v, gold, t, won]
+        self.aim = (CP_LEFT + CP_RIGHT) / 2
+        self.drop_cd = 0.0
+        self.holding = False
+        self.walls = 0.0            # seconds the side walls stay up
+        self.flash = []             # [text, colour, time]
+        self.session_in = self.session_out = 0
+        self.pending_in = self.pending_out = 0
+        self.record_t = 0.0
+        self.win_glow = 0.0
+        self.message = "AIM WITH THE MOUSE, CLICK (OR HOLD) TO DROP CHIPS"
+        self.btn_drop = Button((965, 646, 270, 62), "DROP", (25, 120, 60), 26, "CLICK THE TABLE / SPACE")
+        state = state or {}
+        try:
+            self.chips = [[float(x), float(y), int(v), bool(g)] for x, y, v, g in state.get("chips", [])]
+        except (TypeError, ValueError):
+            self.chips = []
+        if not state:
+            self.fill()
+
+    # ---- machine ---------------------------------------------------------------
+    def fill(self):
+        """A new machine comes loaded with $10 chips, packed in staggered rows."""
+        rng = random.Random(11)
+        self.chips = []
+        top = CP_BACK + CP_PUSH_MIN + CP_PUSH_AMP + CP_R + 2
+        row = 0
+        y = top
+        while y < CP_FRONT - CP_R * 2.2:
+            x = CP_LEFT + CP_R + 6 + (row % 2) * (CP_R + 1)
+            while x < CP_RIGHT - CP_R - 6:
+                if rng.random() < 0.9:
+                    self.chips.append([x + rng.uniform(-2, 2), y + rng.uniform(-2, 2), 10, False])
+                x += 2 * CP_R + 3
+            y += 2 * CP_R * 0.9 + 1
+            row += 1
+
+    def to_state(self):
+        return {"chips": [[round(x, 1), round(y, 1), v, g] for x, y, v, g in self.chips]}
+
+    def face(self):
+        """Where the pusher's front edge is right now."""
+        return CP_BACK + CP_PUSH_MIN + CP_PUSH_AMP * (0.5 - 0.5 * math.cos(2 * math.pi * self.phase / CP_PERIOD))
+
+    def can_leave(self):
+        return True
+
+    def busy(self):
+        return False
+
+    def outstanding_bets(self):
+        return 0
+
+    def leave(self):
+        self.flush_stats()
+        self.holding = False
+
+    def flush_stats(self):
+        if self.pending_in or self.pending_out:
+            self.app.record(self.key, self.pending_in, self.pending_out)
+            self.pending_in = self.pending_out = 0
+
+    # ---- dropping ----------------------------------------------------------------
+    def drop(self):
+        if self.drop_cd > 0:
+            return
+        stake = self.take_bet()
+        if not stake:
+            self.holding = False
+            return
+        self.drop_cd = CP_DROP_GAP
+        self.session_in += stake
+        self.pending_in += stake
+        x = max(CP_LEFT + CP_R, min(CP_RIGHT - CP_R, self.aim + random.uniform(-6, 6)))
+        self.chips.append([x, self.face() + CP_R + 2, stake, False])
+        self.app.sfx("chip")
+        r = random.random()
+        acc = 0.0
+        for kind, chance in CP_BONUS:
+            acc += chance
+            if r < acc:
+                self.bonus(kind, stake)
+                break
+
+    def bonus(self, kind, stake):
+        if kind == "gold":
+            x = random.uniform(CP_LEFT + 60, CP_RIGHT - 60)
+            self.chips.append([x, self.face() + CP_R + 2, stake * CP_GOLD_MULT, True])
+            self.say(f"GOLD CHIP!  WORTH {money(stake * CP_GOLD_MULT)}", GOLD)
+        elif kind == "shower":
+            for i in range(8):
+                x = CP_LEFT + 50 + i * (CP_RIGHT - CP_LEFT - 100) / 7
+                self.chips.append([x + random.uniform(-8, 8), self.face() + CP_R + 2 + random.uniform(0, 30), stake, False])
+            self.say("CHIP SHOWER!  8 FREE CHIPS", (120, 220, 255))
+        else:
+            self.walls = CP_WALL_TIME
+            self.say("SIDE WALLS UP!  NO CHIPS LOST FOR 15s", (140, 240, 150))
+        self.app.sfx("win")
+
+    def say(self, text, col):
+        self.flash.append([text, col, 0.0])
+
+    def handle(self, e):
+        if e.type == pygame.MOUSEMOTION:
+            self.aim = max(CP_LEFT + CP_R, min(CP_RIGHT - CP_R, e.pos[0]))
+        elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            if self.chip_click(e.pos):
+                return
+            if self.btn_clear.clicked(e.pos):
+                self.bet = 0
+            elif self.btn_drop.clicked(e.pos) or (CP_LEFT - 20 < e.pos[0] < CP_RIGHT + 20 and 60 < e.pos[1] < CP_FRONT):
+                if e.pos[1] < CP_FRONT:
+                    self.aim = max(CP_LEFT + CP_R, min(CP_RIGHT - CP_R, e.pos[0]))
+                self.holding = True
+                self.drop()
+        elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
+            self.holding = False
+        elif e.type == pygame.KEYDOWN and e.key == pygame.K_SPACE:
+            self.holding = True
+            self.drop()
+        elif e.type == pygame.KEYUP and e.key == pygame.K_SPACE:
+            self.holding = False
+        elif e.type == pygame.KEYDOWN and e.key in (pygame.K_LEFT, pygame.K_a):
+            self.aim = max(CP_LEFT + CP_R, self.aim - 30)
+        elif e.type == pygame.KEYDOWN and e.key in (pygame.K_RIGHT, pygame.K_d):
+            self.aim = min(CP_RIGHT - CP_R, self.aim + 30)
+
+    # ---- physics -------------------------------------------------------------------
+    def solve(self):
+        """Push chips out of the pusher and out of each other, then see what went over an edge."""
+        face = self.face()
+        chips = self.chips
+        walls = self.walls > 0
+        d2 = (2 * CP_R) ** 2
+        for _ in range(4):
+            for c in chips:
+                if c[1] - CP_R < face:
+                    c[1] = face + CP_R
+            grid = {}
+            for i, c in enumerate(chips):
+                grid.setdefault((int(c[0] // (2 * CP_R)), int(c[1] // (2 * CP_R))), []).append(i)
+            for (gx, gy), members in grid.items():
+                near = []
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        near.extend(grid.get((gx + dx, gy + dy), ()))
+                for i in members:
+                    a = chips[i]
+                    for j in near:
+                        if j <= i:
+                            continue
+                        b = chips[j]
+                        dx, dy = b[0] - a[0], b[1] - a[1]
+                        dist2 = dx * dx + dy * dy
+                        if dist2 >= d2:
+                            continue
+                        dist = math.sqrt(dist2) or 0.01
+                        push = 2 * CP_R - dist
+                        nx, ny = (dx / dist, dy / dist) if dist2 else (random.uniform(-1, 1), 1.0)
+                        a_stuck = a[1] - CP_R <= face + 0.5
+                        b_stuck = b[1] - CP_R <= face + 0.5
+                        if a_stuck and not b_stuck:
+                            ka, kb = 0.0, 1.0
+                        elif b_stuck and not a_stuck:
+                            ka, kb = 1.0, 0.0
+                        else:
+                            ka = kb = 0.5
+                        a[0] -= nx * push * ka
+                        a[1] -= ny * push * ka
+                        b[0] += nx * push * kb
+                        b[1] += ny * push * kb
+            for c in chips:
+                open_side = c[1] > CP_FRONT - CP_DRAIN and not walls
+                if not open_side:
+                    c[0] = max(CP_LEFT + CP_R, min(CP_RIGHT - CP_R, c[0]))
+                if c[1] - CP_R < CP_BACK:
+                    c[1] = CP_BACK + CP_R
+        # over the edge?
+        keep = []
+        for c in chips:
+            if c[1] > CP_FRONT:
+                self.falling.append([c[0], c[1], c[2], c[3], 0.0, True])
+            elif c[0] < CP_LEFT or c[0] > CP_RIGHT:
+                self.falling.append([c[0], c[1], c[2], c[3], 0.0, False])
+            else:
+                keep.append(c)
+        self.chips = keep
+
+    def update(self, dt, draw_fx=True):
+        self.t += dt
+        self.phase += dt
+        self.drop_cd = max(0.0, self.drop_cd - dt)
+        self.walls = max(0.0, self.walls - dt)
+        self.win_glow = max(0.0, self.win_glow - dt * 2)
+        if self.holding:
+            self.drop()
+        self.solve()
+        total = 0
+        for f in self.falling:
+            if f[4] == 0.0 and f[5]:              # just went over the front edge: it's yours
+                total += f[2]
+            f[4] += dt
+        if total:
+            self.app.balance += total
+            self.session_out += total
+            self.pending_out += total
+            self.win_glow = 1.0
+            if draw_fx:
+                self.app.sfx("chip")
+                self.app.float_text(f"+{money(total)}", (80, 230, 110))
+        self.falling = [f for f in self.falling if f[4] < 0.6]
+        for fl in self.flash:
+            fl[2] += dt
+        self.flash = [fl for fl in self.flash if fl[2] < 2.5]
+        self.record_t += dt
+        if self.record_t > 10:
+            self.record_t = 0.0
+            self.flush_stats()
+
+    # ---- drawing ---------------------------------------------------------------------
+    def make_bg(self):
+        s = make_wood()
+        cab = pygame.Rect(CP_LEFT - 50, 64, CP_RIGHT - CP_LEFT + 100, 560)
+        pygame.draw.rect(s, (18, 10, 8), cab.move(0, 8), border_radius=30)
+        pygame.draw.rect(s, (60, 20, 30), cab, border_radius=30)
+        pygame.draw.rect(s, (140, 40, 60), cab, width=4, border_radius=30)
+        field = pygame.Rect(CP_LEFT, CP_BACK, CP_RIGHT - CP_LEFT, CP_FRONT - CP_BACK)
+        for y in range(field.h):
+            k = y / field.h
+            pygame.draw.line(s, lerp_col((20, 70, 110), (40, 120, 170), k), (field.x, field.y + y), (field.right, field.y + y))
+        for x in range(field.x + 40, field.right, 40):
+            pygame.draw.line(s, (50, 110, 160), (x, field.y), (x, field.bottom), 1)
+        # front edge + the win tray under it
+        pygame.draw.rect(s, (230, 190, 60), (CP_LEFT, CP_FRONT - 4, field.w, 8))
+        tray = pygame.Rect(CP_LEFT - 10, CP_FRONT + 10, field.w + 20, 50)
+        pygame.draw.rect(s, (15, 10, 10), tray, border_radius=12)
+        pygame.draw.rect(s, (230, 190, 60), tray, width=2, border_radius=12)
+        # side drains
+        for x in (CP_LEFT - 40, CP_RIGHT):
+            pygame.draw.rect(s, (8, 6, 8), (x, CP_FRONT - CP_DRAIN, 40, CP_DRAIN), border_radius=8)
+        return s
+
+    def draw_chip(self, surf, x, y, v, gold, scale=1.0, alpha=255):
+        r = max(3, int(CP_R * scale))
+        if gold:                                      # bonus chips are shiny gold coins
+            key = ("gold", r, v)
+            cache = self.__dict__.setdefault("gold_imgs", {})
+            if key not in cache:
+                g = pygame.Surface((2 * r + 6, 2 * r + 6), pygame.SRCALPHA)
+                c = (r + 3, r + 3)
+                pygame.draw.circle(g, (0, 0, 0, 120), (c[0] + 2, c[1] + 3), r)
+                pygame.draw.circle(g, (170, 110, 10), c, r)
+                pygame.draw.circle(g, (245, 195, 50), c, r - 2)
+                pygame.draw.circle(g, (255, 225, 110), c, int(r * 0.72))
+                pygame.draw.circle(g, (200, 140, 20), c, int(r * 0.72), 2)
+                label = f"{v / 1e6:g}M" if v >= 10 ** 6 else f"{v / 1000:g}K" if v >= 1000 else str(v)
+                if r >= 10:
+                    draw_text(g, label, fit_font(label, int(r * 0.62), int(r * 1.3)), (110, 60, 5), c)
+                pygame.draw.circle(g, (255, 255, 230), (c[0] - r * 0.35, c[1] - r * 0.4), max(1, r // 6))
+                cache[key] = g
+            img = cache[key]
+            if alpha < 255:
+                img = img.copy()
+                img.set_alpha(alpha)
+            surf.blit(img, img.get_rect(center=(x, y)))
+            return
+        pygame.draw.circle(surf, (0, 0, 0), (x + 2, y + 3), r)
+        img = self.assets.chip(v if v in CHIP_STYLE else max([c for c in CHIP_VALUES if c <= v] or [10]), r)
+        if alpha < 255:
+            img = img.copy()
+            img.set_alpha(alpha)
+        surf.blit(img, img.get_rect(center=(x, y)))
+
+    def draw(self, surf):
+        mouse = pygame.mouse.get_pos()
+        surf.blit(self.bg, (0, 0))
+        face = self.face()
+        # lights around the cabinet
+        for i in range(24):
+            x = CP_LEFT - 30 + i * (CP_RIGHT - CP_LEFT + 60) / 23
+            on = (i + int(self.t * 8)) % 3 == 0
+            pygame.draw.circle(surf, (255, 220, 120) if on else (90, 60, 40), (x, 76), 5)
+        # walls bonus
+        if self.walls:
+            a = int(160 + 80 * math.sin(self.t * 8))
+            for x in (CP_LEFT - 8, CP_RIGHT):
+                pygame.draw.rect(surf, (120, 255, 150), (x, CP_FRONT - CP_DRAIN, 8, CP_DRAIN))
+            draw_text(surf, f"WALLS {math.ceil(self.walls)}s", font(13, bold=True), (140, 240, 150),
+                      (CP_LEFT - 25, CP_FRONT - CP_DRAIN - 14))
+        else:
+            for x in (CP_LEFT - 20, CP_RIGHT + 20):
+                draw_text(surf, "LOST", font(11, bold=True), (120, 60, 60), (x, CP_FRONT - CP_DRAIN / 2))
+        # chips on the table
+        for x, y, v, g in sorted(self.chips, key=lambda c: c[1]):
+            self.draw_chip(surf, x, y, v, g)
+        # the pusher
+        body = pygame.Rect(CP_LEFT, CP_BACK, CP_RIGHT - CP_LEFT, face - CP_BACK)
+        pygame.draw.rect(surf, (150, 155, 170), body)
+        for k in range(0, body.h, 10):
+            pygame.draw.line(surf, (175, 180, 195), (body.x, body.y + k), (body.right, body.y + k), 2)
+        pygame.draw.rect(surf, (230, 232, 240), (CP_LEFT, face - 8, CP_RIGHT - CP_LEFT, 8))
+        pygame.draw.line(surf, (90, 95, 110), (CP_LEFT, face), (CP_RIGHT, face), 2)
+        # the chute you aim
+        ax = self.aim
+        pygame.draw.polygon(surf, (40, 40, 50), [(ax - 26, 58), (ax + 26, 58), (ax + 14, 90), (ax - 14, 90)])
+        pygame.draw.polygon(surf, GOLD, [(ax - 26, 58), (ax + 26, 58), (ax + 14, 90), (ax - 14, 90)], 2)
+        if self.bet:
+            self.draw_chip(surf, ax, 72, self.bet if self.bet in CHIP_STYLE else max(
+                [c for c in CHIP_VALUES if c <= self.bet] or [10]), False, 0.55)
+        for yy in range(int(face) + 6, int(face) + 40, 8):
+            pygame.draw.line(surf, (255, 255, 255), (ax, yy), (ax, yy + 3), 1)
+        # chips falling off
+        for x, y, v, g, t, won in self.falling:
+            k = t / 0.6
+            if won:
+                self.draw_chip(surf, x, y + k * 40, v, g, 1 - k * 0.4, int(255 * (1 - k)))
+            else:
+                self.draw_chip(surf, x + (-1 if x < CP_LEFT else 1) * k * 30, y + k * 20, v, g, 1 - k * 0.6,
+                               int(255 * (1 - k)))
+        # win tray glow
+        if self.win_glow:
+            g = pygame.Surface((CP_RIGHT - CP_LEFT + 20, 50), pygame.SRCALPHA)
+            pygame.draw.rect(g, (255, 220, 90, int(90 * self.win_glow)), g.get_rect(), border_radius=12)
+            surf.blit(g, (CP_LEFT - 10, CP_FRONT + 10))
+        draw_text(surf, "WIN TRAY", font(13, bold=True), (230, 190, 60), (CP_LEFT + 12, CP_FRONT + 35), anchor="midleft")
+        # side panels
+        net = self.session_out - self.session_in
+        left = pygame.Rect(22, 90, 250, 250)
+        soft_panel(surf, left, 170, (140, 40, 60))
+        draw_text(surf, "THIS VISIT", font(16, bold=True), GOLD, (left.centerx, left.y + 24))
+        for k, (label, val, col) in enumerate((("DROPPED", money(self.session_in), WHITE),
+                                                ("WON", money(self.session_out), (120, 230, 140)),
+                                                ("NET", ("+" if net >= 0 else "-") + money(abs(net)),
+                                                 (120, 230, 140) if net >= 0 else (240, 120, 120)))):
+            y = left.y + 64 + k * 44
+            draw_text(surf, label, font(14, bold=True), (190, 180, 200), (left.x + 20, y), anchor="midleft")
+            draw_text(surf, val, font(18, bold=True), col, (left.right - 20, y), anchor="midright")
+        on_table = sum(c[2] for c in self.chips)
+        draw_text(surf, f"On the table: {money(on_table)}", font(13), (170, 170, 190), (left.centerx, left.bottom - 22))
+        right = pygame.Rect(W - 272, 90, 250, 250)
+        soft_panel(surf, right, 170, (140, 40, 60))
+        draw_text(surf, "BONUSES", font(16, bold=True), GOLD, (right.centerx, right.y + 24))
+        lines = [("GOLD CHIP", f"worth {CP_GOLD_MULT}x your drop", GOLD),
+                 ("CHIP SHOWER", "8 free chips", (120, 220, 255)),
+                 ("SIDE WALLS", "nothing lost for 15s", (140, 240, 150))]
+        for k, (a, b, col) in enumerate(lines):
+            y = right.y + 62 + k * 52
+            draw_text(surf, a, font(15, bold=True), col, (right.x + 18, y), anchor="midleft")
+            draw_text(surf, b, font(13), (190, 190, 205), (right.x + 18, y + 20), anchor="midleft")
+        draw_text(surf, "Any drop can trigger one!", font(12), (160, 160, 180), (right.centerx, right.bottom - 20))
+        for k, (text, col, t) in enumerate(reversed(self.flash[-3:])):      # newest on top
+            if t < 2.3:
+                draw_pill(surf, text, font(20, bold=True), ((CP_LEFT + CP_RIGHT) / 2, 330 + k * 44 - min(t, 0.3) * 60),
+                          col, (0, 0, 0, 215), col, pad=(16, 5))
+        if self.message:
+            draw_pill(surf, self.message, font(14, bold=True), (640, 628), GOLD, (0, 0, 0, 210), GOLD_DARK, pad=(14, 3))
+        self.btn_drop.text = f"DROP {money(self.bet)}" if self.bet else "DROP"
+        self.draw_bottom(surf, mouse, self.btn_drop, 0 < self.bet <= self.app.balance, (16, 8, 10))
+        self.app.draw_top_bar(surf, "CHIP PUSHER", lobby=True)
+
+
+def art_pusher(w, h):
+    k = 2
+    s = pygame.Surface((w * k, h * k), pygame.SRCALPHA)
+    for y in range(h * k):
+        pygame.draw.line(s, lerp_col((30, 90, 140), (15, 50, 90), y / (h * k)), (0, y), (w * k, y))
+    pygame.draw.rect(s, (160, 165, 180), (0, 0, w * k, h * k * 0.22))
+    pygame.draw.rect(s, (235, 235, 245), (0, h * k * 0.22 - 8, w * k, 8))
+    rng = random.Random(4)
+    for _ in range(28):
+        x, y = rng.uniform(30, w * k - 30), rng.uniform(h * k * 0.35, h * k * 0.9)
+        img = pygame.transform.smoothscale(make_chip(rng.choice(CHIP_VALUES[:8]), 26), (44, 44))
+        s.blit(img, img.get_rect(center=(x, y)))
+    pygame.draw.rect(s, (230, 190, 60), (0, h * k - 10, w * k, 10))
+    draw_text(s, "CHIP PUSHER", font(h * k * 0.13, bold=True, serif=True), (255, 225, 120),
+              (w * k * 0.5, h * k * 0.11), shadow=(0, 0, 0))
+    return pygame.transform.smoothscale(s, (w, h))
+
+
+# --------------------------------------------------------------------------
 # Lobby / menu
 # --------------------------------------------------------------------------
 def art_blackjack(assets, w, h):
@@ -14136,6 +14540,7 @@ GAME_INFO = {       # scene -> (title, one-line description)
     "sicbo": ("SIC BO", "Three dice and dozens of ways to bet."),
     "wheel": ("WHEEL", "Spin for a multiplier from x0.1 to x5."),
     "cups": ("CUPS", "Follow the ball as the cups get shuffled."),
+    "pusher": ("CHIP PUSHER", "Drop chips, push them over the edge. Just like the arcade!"),
     "slots": ("SLOTS", "Line up the symbols on 5 paylines."),
     "rocket": ("ROCKET", "Cash out before the rocket explodes!"),
     "plinko": ("PLINKO", "Drop balls through the pegs - edges pay 170x."),
@@ -14155,7 +14560,7 @@ NON_GAMES = {"counting"}        # lobby entries that aren't betting games (no st
 CATEGORIES = [("CARDS", ["blackjack", "poker", "baccarat", "videopoker", "bus", "dragontiger"]),
               ("TABLE & DICE", ["roulette", "craps", "sicbo", "wheel", "cups"]),
               ("INSTANT WIN", ["slots", "rocket", "plinko", "mines", "scratch", "keno"]),
-              ("ARCADE", ["crossy", "pinball", "deepdive"]),
+              ("ARCADE", ["crossy", "pinball", "deepdive", "pusher"]),
               ("SPECIAL", ["yesno", "horses", "stocks", "lottery"]),
               ("LEARN", ["counting"])]
 DAILY_MAX = 1000
@@ -14183,7 +14588,8 @@ class Menu:
             "deepdive": lambda: art_deepdive(aw, ah), "horses": lambda: art_horses(aw, ah),
             "stocks": lambda: art_stocks(aw, ah), "lottery": lambda: art_lottery(aw, ah),
             "counting": lambda: art_counting(a, aw, ah), "pinball": lambda: art_pinball(aw, ah),
-            "crossy": lambda: art_crossy(aw, ah), "cups": lambda: art_cups(aw, ah), "yesno": lambda: art_yesno(aw, ah),
+            "crossy": lambda: art_crossy(aw, ah), "cups": lambda: art_cups(aw, ah),
+            "pusher": lambda: art_pusher(aw, ah), "yesno": lambda: art_yesno(aw, ah),
         }
         self.art = {}
         for key, make in makers.items():
@@ -15155,6 +15561,22 @@ HELP = {
         ("b", "Blackjack pays 3 to 2 and the dealer stands on all 17s. (Splitting isn't available at the "
               "multiplayer table.)"),
     ]),
+    "pusher": ("CHIP PUSHER", [
+        ("h", "Just like the arcade"),
+        ("p", "The table is covered in chips, and a pusher slides back and forth shoving them towards the front. "
+              "Drop your chips in, and try to push the pile over the edge!"),
+        ("b", "Set how much each drop costs with the chips at the bottom."),
+        ("b", "Move the mouse to aim the chute left or right. Click the table (or hold the mouse, or Space) to drop."),
+        ("b", "Chips that fall off the FRONT edge land in the win tray - they're yours."),
+        ("b", "Chips pushed into the side drains near the front are LOST."),
+        ("h", "Bonuses"),
+        ("b", "GOLD CHIP - a gold chip worth 5x your drop lands on the table. Push it off for a big win."),
+        ("b", "CHIP SHOWER - 8 free chips rain onto the table."),
+        ("b", "SIDE WALLS - the side drains close for 15 seconds, so nothing is lost."),
+        ("h", "The table is saved"),
+        ("p", "Chips you leave on the table stay there, even if you close the game - come back later and keep pushing. "
+              "Bigger drops make bigger chips, and every chip pays out what it's worth."),
+    ]),
     "cups": ("CUPS", [
         ("h", "The goal"),
         ("p", "A ball is hidden under one of the cups. Watch closely while the cups are shuffled, then pick the "
@@ -15480,7 +15902,8 @@ class App:
                        "counting": CountingSchool(self), "pinball": Pinball(self), "work": Work(self),
                        "crossy": Crossy(self), "yesno": self.yesno, "cups": Cups(self),
                        "netpoker": NetPoker(self), "netbj": NetBlackjack(self), "online": Online(self),
-                       "settings": Settings(self), "title": Title(self)}
+                       "settings": Settings(self), "title": Title(self),
+                       "pusher": Pusher(self, self.saved.get("pusher"))}
         self.games = list(self.scenes.values())
         self.profile = ProfileOverlay(self)
         self.scene = "title"            # the game opens on the main menu
@@ -15509,7 +15932,9 @@ class App:
                            "played": sorted(getattr(self, "played", [])), "daily": getattr(self, "daily", {}),
                            "lottery": self.lottery.to_state() if hasattr(self, "lottery") else {},
                            "name": getattr(self, "player_name", "Player"),
-                           "sound": getattr(self, "sound_on", True)}, f)
+                           "sound": getattr(self, "sound_on", True),
+                           "pusher": self.scenes["pusher"].to_state() if hasattr(self, "scenes") else
+                           self.saved.get("pusher", {})}, f)
             os.replace(tmp, SAVE_FILE)
         except OSError:
             pass
