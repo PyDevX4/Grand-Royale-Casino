@@ -34,7 +34,7 @@ ICON = "icon.ico"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # What changed - shown on the GitHub release page. Edit before publishing if you like.
-NOTES = "Cups is harder on every difficulty: more and faster moves, fake-outs, three-cup spins and (on hard) double swaps. The game installs this update by itself the next time you open it."
+NOTES = "New: EXTREME cups - 5 cups, 100 moves, pays x100. It starts slow, but by the end the cups are flying all over the table. The game installs this update by itself the next time you open it."
 DOWNLOAD_NOTE = "\n".join([
     "---",
     "**To play: download the .zip below.** Unzip it and run \"Grand Royale Casino.exe\" inside.",

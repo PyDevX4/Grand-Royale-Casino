@@ -10824,11 +10824,14 @@ CUP_LEVELS = [   # name, cups, moves, first move time, last move time, payout
     ("EASY", 3, 12, 0.42, 0.26, 1.3),
     ("MEDIUM", 3, 18, 0.30, 0.15, 2.0),
     ("HARD", 4, 26, 0.22, 0.09, 3.5),
+    ("EXTREME", 5, 100, 0.75, 0.065, 100),
 ]
+CUP_EXTREME = 3                  # index of EXTREME: slow at first, then the cups fly all over the table
 CUP_TRICKS = [   # chance of a fake-out, a three-cup spin, and (4 cups only) two swaps at once
     (0.15, 0.10, 0.0),
     (0.25, 0.25, 0.0),
     (0.25, 0.20, 0.35),
+    (0.20, 0.25, 0.40),
 ]
 CUP_Y = 430              # where the cups sit on the table
 CUP_LIFT = 110
@@ -10878,8 +10881,8 @@ class Cups(StakeGame):
         self.lift = {}              # cup id -> how far it's lifted (0..1)
         self.hard_streak = 0
         self.message = "PICK A DIFFICULTY, SET YOUR BET, THEN PRESS START"
-        self.lvl_btns = [Button((W / 2 - 390 + i * 265, 78, 250, 58), name, (40, 70, 130), 22,
-                                f"{n} CUPS  -  PAYS x{pay}") for i, (name, n, _, _, _, pay) in enumerate(CUP_LEVELS)]
+        self.lvl_btns = [Button((W / 2 - 466 + i * 236, 78, 224, 58), name, (40, 70, 130), 22,
+                                f"{n} CUPS  -  PAYS x{pay:g}") for i, (name, n, _, _, _, pay) in enumerate(CUP_LEVELS)]
         self.btn_start = Button((965, 646, 270, 62), "START", (25, 120, 60), 26, "SPACE")
         self.reset_cups()
 
@@ -10894,20 +10897,20 @@ class Cups(StakeGame):
 
     def slot_x(self, slot, n=None):
         n = n or self.n
-        gap = 260 if n == 3 else 215
+        gap = {3: 260, 4: 215}.get(n, 205)
         return W / 2 + (slot - (n - 1) / 2) * gap
 
     def cup_pos(self, cup):
         """Screen x, y of a cup's rim, following any swap in progress."""
         s = self.swap
         if s and cup in s["paths"]:
-            fs, ts, arc = s["paths"][cup]
+            fs, ts, arc, swing = s["paths"][cup]
             k = min(1.0, s["t"] / s["len"])
             k = k * k * (3 - 2 * k)                         # ease in and out
             lift = math.sin(math.pi * k)
             f = 0.5 * lift if s["fake"] else k              # a fake-out meets in the middle, then goes back
-            x = self.slot_x(fs) + (self.slot_x(ts) - self.slot_x(fs)) * f
-            return x, CUP_Y + lift * arc
+            x = self.slot_x(fs) + (self.slot_x(ts) - self.slot_x(fs)) * f + math.sin(2 * math.pi * k) * swing
+            return x, min(CUP_Y + 165, max(CUP_Y - 235, CUP_Y + lift * arc))
         return self.slot_x(self.slot_of[cup]), CUP_Y
 
     def busy(self):
@@ -10941,12 +10944,21 @@ class Cups(StakeGame):
         self.message = "WATCH THE BALL..."
         self.app.sfx("chip")
 
+    def wildness(self):
+        """0 until move 40 of EXTREME, rising to 1 (cups flying everywhere) by move 80."""
+        if self.level != CUP_EXTREME:
+            return 0.0
+        return max(0.0, min(1.0, (self.done_swaps - 40) / 40))
+
     def make_move(self, n):
         """One shuffle move: which slot each moving cup goes to, and whether it's a fake-out."""
         fake_p, spin_p, double_p = CUP_TRICKS[self.level]
-        if n == 4 and random.random() < double_p:
-            a, b, c, d = random.sample(range(4), 4)
+        if n >= 4 and random.random() < double_p:
+            a, b, c, d = random.sample(range(n), 4)
             return {"map": {a: b, b: a, c: d, d: c}, "fake": False}
+        if n == 5 and random.random() < 0.12:           # all five cups swap places at once
+            order = random.sample(range(5), 5)
+            return {"map": {order[i]: order[(i + 1) % 5] for i in range(5)}, "fake": False}
         if random.random() < spin_p:
             a, b, c = random.sample(range(n), 3)
             return {"map": {a: b, b: c, c: a}, "fake": False}
@@ -10958,7 +10970,7 @@ class Cups(StakeGame):
         if self.done_swaps >= count:
             self.swap = None
             self.state = "pick"
-            self.message = "WHERE'S THE BALL?  CLICK A CUP" + (" (OR PRESS 1-4)" if n == 4 else " (OR PRESS 1-3)")
+            self.message = f"WHERE'S THE BALL?  CLICK A CUP (OR PRESS 1-{n})"
             return
         mv = self.swaps[self.done_swaps]
         paths = {}
@@ -10966,8 +10978,19 @@ class Cups(StakeGame):
             cup = self.slot_of.index(fs)
             dist = abs(ts - fs)
             arc = -(30 + 14 * dist) if ts > fs else 22 + 10 * dist      # right-movers pass behind, left-movers in front
-            paths[cup] = (fs, ts, arc)
-        length = t0 + (t1 - t0) * self.done_swaps / max(1, count - 1)        # faster and faster
+            swing = 0.0
+            wild = self.wildness()
+            if wild:                                    # EXTREME: big loops up and down, and wide swings sideways
+                arc = (arc / abs(arc)) * (abs(arc) + wild * random.uniform(110, 230))
+                if random.random() < wild * 0.5:
+                    arc = -arc
+                swing = wild * random.uniform(60, 170) * random.choice((-1, 1))
+            paths[cup] = (fs, ts, arc, swing)
+        prog = self.done_swaps / max(1, count - 1)
+        if self.level == CUP_EXTREME:
+            length = t0 * (t1 / t0) ** prog             # starts slow, speeds up the whole way
+        else:
+            length = t0 + (t1 - t0) * prog              # faster and faster
         self.swap = {"paths": paths, "t": 0.0, "len": length, "fake": mv["fake"]}
         self.app.sfx("card")
 
@@ -10990,6 +11013,8 @@ class Cups(StakeGame):
                 self.hard_streak += 1
                 if self.hard_streak >= 3:
                     self.app.unlock("eagle_eye")
+            if self.level == CUP_EXTREME:
+                self.app.unlock("cup_legend")
             self.finish(self.stake, win, f"YOU FOUND IT!  YOU WIN {money(win)}")
         else:
             if self.level == 2:
@@ -11005,7 +11030,7 @@ class Cups(StakeGame):
 
     def handle(self, e):
         if e.type == pygame.KEYDOWN:
-            if self.state == "pick" and e.unicode in "1234" and e.unicode and int(e.unicode) <= self.n:
+            if self.state == "pick" and e.unicode and e.unicode in "12345" and int(e.unicode) <= self.n:
                 slot = int(e.unicode) - 1
                 self.pick(self.slot_of.index(slot))
             elif e.key in (pygame.K_SPACE, pygame.K_RETURN):
@@ -11013,7 +11038,7 @@ class Cups(StakeGame):
             elif e.key == pygame.K_LEFT:
                 self.set_level(max(0, self.level - 1))
             elif e.key == pygame.K_RIGHT:
-                self.set_level(min(2, self.level + 1))
+                self.set_level(min(len(CUP_LEVELS) - 1, self.level + 1))
         elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
             if self.state == "pick":
                 cup = self.cup_at(e.pos)
@@ -11047,7 +11072,7 @@ class Cups(StakeGame):
             self.swap["t"] += dt
             if self.swap["t"] >= self.swap["len"]:
                 if not self.swap["fake"]:
-                    for cup, (fs, ts, _) in self.swap["paths"].items():
+                    for cup, (fs, ts, *_) in self.swap["paths"].items():
                         self.slot_of[cup] = ts
                 self.done_swaps += 1
                 self.next_swap()
@@ -11068,7 +11093,7 @@ class Cups(StakeGame):
         mouse = pygame.mouse.get_pos()
         surf.blit(self.bg, (0, 0))
         for i, b in enumerate(self.lvl_btns):
-            b.color = (200, 150, 30) if i == self.level else (40, 70, 130)
+            b.color = (200, 150, 30) if i == self.level else ((150, 30, 60) if i == CUP_EXTREME else (40, 70, 130))
             b.draw(surf, mouse, not self.busy() or i == self.level)
         # progress while shuffling
         name, n, count, _, _, pay = CUP_LEVELS[self.level]
@@ -14306,6 +14331,7 @@ ACHIEVEMENTS = [     # (id, name, how to get it, bonus chips)
     ("chicken_cross", "Why Did The Chicken...", "Reach 50 roads in one game of Chicken Crossing", 2500),
     ("oracle", "The Oracle", "Win 5 Yes or No bets in a row", 1000),
     ("eagle_eye", "Eagle Eye", "Find the ball on HARD cups 3 times in a row", 1000),
+    ("cup_legend", "Cup Legend", "Find the ball on EXTREME cups", 5000),
 ]
 ACH_BY_ID = {a[0]: a for a in ACHIEVEMENTS}
 
@@ -14859,11 +14885,13 @@ HELP = {
         ("b", "Pick a difficulty at the top (or use the LEFT / RIGHT arrows)."),
         ("b", "Click chips to set your bet, then press START (or Space)."),
         ("b", "The ball is shown under its cup, then the cups start swapping places - faster and faster."),
-        ("b", "When they stop, click a cup (or press 1, 2, 3 or 4 - the numbers under the cups)."),
+        ("b", "When they stop, click a cup (or press the number under it - 1 to 5)."),
         ("h", "Difficulties"),
         ("b", "EASY - 3 cups, 12 moves. Pays x1.3."),
         ("b", "MEDIUM - 3 cups, 18 fast moves. Pays x2."),
         ("b", "HARD - 4 cups, 26 lightning-fast moves. Pays x3.5."),
+        ("b", "EXTREME - 5 cups and 100 moves. It starts slow and easy... but it never stops speeding up, and "
+              "by the end the cups are flying all over the table. Pays x100!"),
         ("h", "Watch out for tricks"),
         ("b", "FAKE-OUTS - two cups start to swap, meet in the middle... and go back where they were."),
         ("b", "SPINS - all three cups move at once, each one sliding to a different spot."),
