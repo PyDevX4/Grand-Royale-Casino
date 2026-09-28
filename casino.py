@@ -10,7 +10,6 @@ import json
 import math
 import os
 import random
-import socket
 import sys
 import time
 from array import array
@@ -18,12 +17,24 @@ from collections import deque
 
 import pygame
 
-try:                        # auto-updates (only the built .exe actually updates itself)
-    import updater
+# The browser version (built with pygbag) runs under Emscripten. A browser tab can't open network
+# connections to friends or replace its own program, so multiplayer and auto-updates are switched off
+# there - the web page always serves the newest version anyway.
+WEB = sys.platform == "emscripten"
+try:
+    import socket
+except ImportError:
+    socket = None
+try:
     from version import VERSION
 except ImportError:         # someone was given just casino.py on its own
-    updater = None
     VERSION = "dev"
+updater = None
+if not WEB:
+    try:                    # auto-updates (only the built .exe actually updates itself)
+        import updater
+    except ImportError:
+        updater = None
 
 # --------------------------------------------------------------------------
 # Config
@@ -35,6 +46,8 @@ if getattr(sys, "frozen", False):      # the built .exe: keep the save next to i
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_FILE = os.path.join(BASE_DIR, "save.json")
+WEB_SAVE_KEY = "grand_royale_save"     # the browser keeps the save in its local storage
+WEB_DEBUG = False                      # print keys and clicks to the browser console (for fixing web problems)
 START_BALANCE = 500
 
 CW, CH = 90, 126          # card size
@@ -116,6 +129,13 @@ def draw_text(surf, text, f, color, pos, anchor="center", shadow=None):
         surf.blit(f.render(text, True, shadow), rect.move(2, 2))
     surf.blit(img, rect)
     return rect
+
+
+def toggle_fullscreen():
+    try:
+        pygame.display.toggle_fullscreen()
+    except Exception:              # not every browser allows it - F11 in the browser works anyway
+        pass
 
 
 def fit_font(text, size, width, bold=True):
@@ -381,9 +401,10 @@ CHIP_WIN = ChipWindow()
 # Sound (synthesised so no asset files are needed)
 # --------------------------------------------------------------------------
 def synth(duration, parts, vol=0.35):
-    sr = 22050
+    sr, size, channels = pygame.mixer.get_init() or (22050, -16, 1)
+    floats = size == 32
     n = int(sr * duration)
-    buf = array("h")
+    buf = array("f" if floats else "h")
     for i in range(n):
         t = i / sr
         v = 0.0
@@ -396,7 +417,10 @@ def synth(duration, parts, vol=0.35):
                 v += random.uniform(-1, 1) * env
             else:
                 v += math.sin(2 * math.pi * freq * tt) * env
-        buf.append(int(max(-1, min(1, v * vol)) * 32767))
+        sample = max(-1.0, min(1.0, v * vol))
+        sample = sample if floats else int(sample * 32767)
+        for _ in range(channels):
+            buf.append(sample)
     return pygame.mixer.Sound(buffer=buf.tobytes())
 
 
@@ -2623,7 +2647,7 @@ STOCK_LIMIT = 30                            # no stock goes below 1/30 or above 
 STOCK_BET_TIME = 300              # a higher/lower bet is decided 5 minutes after you place it
 STOCK_BET_PAY = 1.9
 STOCK_BET_MAX = 10                # bets you can have running at once
-MAX_OFFLINE = 6 * 3600          # market catches up for time the game was closed, up to 6 hours
+MAX_OFFLINE = 6 * 3600 if not WEB else 2 * 3600          # market catches up for time the game was closed, up to 6 hours
 SPREAD = 0.002                  # buy at the ask (0.1% above the price), sell at the bid (0.1% below)
 UP_COL, DOWN_COL = (60, 210, 120), (235, 80, 80)
 
@@ -2870,7 +2894,8 @@ class Market:
         return {"t": time.time(), "news": self.news, "holdings": self.holdings, "trades": self.trades,
                 "realized": self.realized, "bets": self.bets, "bet_id": self.bet_id,
                 "unpaid": self.settled,
-                "stocks": {s["sym"]: {"price": s["price"], "fair": s["fair"], "hist": list(s["hist"])}
+                "stocks": {s["sym"]: {"price": s["price"], "fair": s["fair"],
+                                      "hist": list(s["hist"])[-900:] if WEB else list(s["hist"])}
                            for s in self.stocks}}
 
     def load_state(self, state):
@@ -13213,7 +13238,7 @@ class Settings:
                 self.app.save()
                 self.app.sfx("chip")
             elif self.btn_full.clicked(e.pos):
-                pygame.display.toggle_fullscreen()
+                toggle_fullscreen()
             elif self.btn_delete.clicked(e.pos):
                 if self.confirm_t > 0:
                     self.app.reset_everything()
@@ -13404,7 +13429,7 @@ class Title:
         elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
             if self.btn_play.clicked(e.pos):
                 self.gamble()
-            elif self.btn_quit.clicked(e.pos):
+            elif self.btn_quit.clicked(e.pos) and not WEB:
                 self.app.quit()
 
     def gamble(self):
@@ -13646,7 +13671,8 @@ class Title:
                 pygame.draw.rect(g, (120, 255, 150, int(40 + 50 * pulse)), g.get_rect(), border_radius=34)
                 canvas.blit(g, (self.btn_play.rect.x - 20, self.btn_play.rect.y - 20))
             self.btn_play.draw(canvas, mouse, self.done())
-            self.btn_quit.draw(canvas, mouse, self.done())
+            if not WEB:
+                self.btn_quit.draw(canvas, mouse, self.done())
             info_a = int(255 * btn_k)
             img = font(16, bold=True).render(f"YOUR CHIPS: {money(self.app.balance)}", True, GOLD)
             img.set_alpha(info_a)
@@ -14987,7 +15013,10 @@ class Menu:
                     self.set_tab(i)
                     return
             if self.btn_online.clicked(e.pos):
-                self.app.scene = "online"
+                if WEB:
+                    self.app.effects.toast("MULTIPLAYER", "Playing with friends needs the downloaded version of the game")
+                else:
+                    self.app.scene = "online"
                 return
             if self.btn_settings.clicked(e.pos):
                 self.app.scene = "settings"
@@ -16153,10 +16182,12 @@ class App:
                 ctypes.windll.user32.SetProcessDPIAware()
             except Exception:
                 pass
-        pygame.mixer.pre_init(22050, -16, 1, 256)
+        if not WEB:
+            pygame.mixer.pre_init(22050, -16, 1, 256)
         pygame.init()
         pygame.display.set_caption("Grand Royale Casino  (play money)")
-        self.screen = pygame.display.set_mode((W, H), pygame.SCALED | pygame.RESIZABLE)
+        self.screen = pygame.display.set_mode((W, H)) if WEB else \
+            pygame.display.set_mode((W, H), pygame.SCALED | pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.saved = {}
         self.net = None             # our connection to a multiplayer game
@@ -16227,19 +16258,26 @@ class App:
         self.last_scene = "menu"
 
     # ---- persistence -----------------------------------------------------
+    @staticmethod
+    def web_storage():
+        import platform                 # pygbag's platform module gives access to the page's JavaScript
+        return platform.window.localStorage
+
     def load(self):
         try:
-            with open(SAVE_FILE) as f:
-                self.saved = json.load(f)
+            if WEB:
+                text = self.web_storage().getItem(WEB_SAVE_KEY)
+                self.saved = json.loads(str(text)) if text else {}
+            else:
+                with open(SAVE_FILE) as f:
+                    self.saved = json.load(f)
             return max(0, int(self.saved["balance"]))
         except Exception:
             return START_BALANCE
 
     def save(self):
         try:
-            tmp = SAVE_FILE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump({"balance": self.balance, "market": self.market.to_state(),
+            self.write_save({"balance": self.balance, "market": self.market.to_state(),
                            "help_seen": sorted(getattr(self, "help_seen", [])),
                            "stats": getattr(self, "stats", {}), "achievements": getattr(self, "achievements", {}),
                            "played": sorted(getattr(self, "played", [])), "daily": getattr(self, "daily", {}),
@@ -16247,10 +16285,18 @@ class App:
                            "name": getattr(self, "player_name", "Player"),
                            "sound": getattr(self, "sound_on", True),
                            "pusher": self.scenes["pusher"].to_state() if hasattr(self, "scenes") else
-                           self.saved.get("pusher", {})}, f)
-            os.replace(tmp, SAVE_FILE)
-        except OSError:
+                           self.saved.get("pusher", {})})
+        except Exception:
             pass
+
+    def write_save(self, data):
+        if WEB:
+            self.web_storage().setItem(WEB_SAVE_KEY, json.dumps(data, separators=(",", ":")))
+            return
+        tmp = SAVE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, SAVE_FILE)
 
     # ---- shared UI -------------------------------------------------------
     def sfx(self, name):
@@ -16265,6 +16311,11 @@ class App:
         if self.net_server:
             self.net_server.close()
         self.net = self.net_server = None
+        if WEB:
+            try:
+                self.web_storage().removeItem(WEB_SAVE_KEY)
+            except Exception:
+                pass
         for f in (SAVE_FILE, SAVE_FILE + ".tmp"):
             try:
                 os.remove(f)
@@ -16676,17 +16727,29 @@ class App:
             self.net.close()
         if self.net_server:
             self.net_server.close()
+        if WEB:                          # a browser tab can't close itself - you just close the tab
+            return
         pygame.quit()
         sys.exit()
 
     def run(self):
+        for _ in self.frames():
+            pass
+
+    def frames(self):
+        """The main loop. It pauses (yields) at the start of every frame: the desktop just carries straight on,
+        and the browser version uses the pause to let the web page draw and react."""
         while True:
+            yield
             dt = min(self.clock.tick(FPS) / 1000, 0.05)
             for e in pygame.event.get():
+                if WEB and WEB_DEBUG and e.type not in (pygame.MOUSEMOTION, pygame.WINDOWMOVED):
+                    self.debug_log = (getattr(self, "debug_log", []) + [
+                        f"{pygame.event.event_name(e.type)} {dict((k, v) for k, v in e.dict.items() if k in ('key', 'unicode', 'pos', 'button', 'x', 'y'))} [{self.scene}]"])[-12:]
                 if e.type == pygame.QUIT:
                     self.quit()
                 if e.type == pygame.KEYDOWN and e.key == pygame.K_F11:
-                    pygame.display.toggle_fullscreen()
+                    toggle_fullscreen()
                     continue
                 if self.help.active:
                     self.help.handle(e)
@@ -16769,7 +16832,7 @@ class App:
                         self.unlock(aid)
             self.autosave_t -= dt
             if self.autosave_t <= 0:
-                self.autosave_t = 30.0
+                self.autosave_t = 10.0 if WEB else 30.0      # a browser tab can be closed at any moment
                 self.save()
             up = self.auto_updater
             if (up and up.state == "ready" and self.scene in ("menu", "title") and not self.net and not self.help.active
@@ -16800,6 +16863,10 @@ class App:
 
             CHIP_WIN.frame += 1
             self.current().draw(self.screen)
+            if WEB and WEB_DEBUG:
+                for i, line in enumerate(getattr(self, "debug_log", [])):
+                    draw_text(self.screen, line, font(13, bold=True), (255, 255, 0), (8, 70 + i * 16), anchor="topleft",
+                              shadow=(0, 0, 0))
             self.draw_chip_arrows(self.screen)
             self.draw_others(self.screen)
             self.draw_chat(self.screen)

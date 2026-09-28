@@ -16,6 +16,14 @@ the file (it isn't signed) - click **More info**, then **Run anyway**.
 The game updates itself: when a new version is out, it downloads it in the background and installs it the
 next time you're in the lobby.
 
+## Play in a web browser
+
+No download needed - it runs right in the browser (handy for Chromebooks):
+
+**https://pydevx4.github.io/Grand-Royale-Casino/**
+
+Your chips are saved in that browser. Multiplayer needs the downloaded version.
+
 ## Run from source
 
 ```

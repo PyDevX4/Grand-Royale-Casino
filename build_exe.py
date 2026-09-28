@@ -34,7 +34,7 @@ ICON = "icon.ico"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # What changed - shown on the GitHub release page. Edit before publishing if you like.
-NOTES = "Coin Flip: call the EDGE for 20x, and DOUBLE OR NOTHING after every win. The game installs this update by itself the next time you open it."
+NOTES = "The casino now runs in a web browser too - no download needed: https://pydevx4.github.io/Grand-Royale-Casino/ . The game installs this update by itself the next time you open it."
 DOWNLOAD_NOTE = "\n".join([
     "---",
     "**To play: download the .zip below.** Unzip it and run \"Grand Royale Casino.exe\" inside.",
@@ -197,6 +197,9 @@ def main():
         sys.exit("build reported success but %s is missing" % out)
     print("\nbuilt %s  (%.1f MB)" % (out, os.path.getsize(out) / 1e6))
     package(out, publish_it="--publish" in args)
+    if "--publish" in args and "--no-web" not in args:
+        import build_web                     # keep the browser version on the same version as the .exe
+        build_web.publish(build_web.build())
 
 
 if __name__ == "__main__":
