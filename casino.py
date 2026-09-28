@@ -448,10 +448,15 @@ def make_sounds():
 class Assets:
     def __init__(self):
         self.faces = {(r, s): make_card_face(r, s) for s in SUITS for r in RANKS}
-        self.back = make_card_back()
+        self._back = make_card_back()
         self.shadow = pygame.Surface((CW, CH), pygame.SRCALPHA)
         pygame.draw.rect(self.shadow, (0, 0, 0, 70), (0, 0, CW, CH), border_radius=8)
         self._chips = {}
+
+    @property
+    def back(self):
+        """The card back - in the season's design when a theme is on."""
+        return themed(("back",), lambda: make_themed_back(CURRENT_THEME)) if CURRENT_THEME else self._back
 
     def chip(self, value, radius):
         key = (value, radius)
@@ -1624,8 +1629,9 @@ class Roulette:
         if self.ball_rel is not None:
             bx, by = wheel_point(WHEEL_C, self.wheel_angle + self.ball_rel, self.ball_r)
             pygame.draw.circle(surf, (0, 0, 0), (bx + 2, by + 3), 7)
-            pygame.draw.circle(surf, (235, 235, 230), (bx, by), 7)
-            pygame.draw.circle(surf, WHITE, (bx - 2, by - 2), 3)
+            if not draw_theme_ball(surf, bx, by, 8):
+                pygame.draw.circle(surf, (235, 235, 230), (bx, by), 7)
+                pygame.draw.circle(surf, WHITE, (bx - 2, by - 2), 3)
         if self.state == "result":
             n = self.win_number
             draw_pill(surf, f"  {n}  ", font(30, bold=True, serif=True), (WHEEL_C[0], 600), WHITE,
@@ -2382,6 +2388,26 @@ class Slots:
     def leave(self):
         pass
 
+    def symbols(self, blurred):
+        """The reel pictures - three of the fruit become seasonal when a theme is on (same payouts)."""
+        if not CURRENT_THEME:
+            return self.blur if blurred else self.sym
+
+        def make():
+            swap = THEME_SLOTS[CURRENT_THEME]
+            sym = {n: make_theme_symbol(swap[n]) if n in swap else img for n, img in self.sym.items()}
+            blur = {n: pygame.transform.smoothscale(pygame.transform.smoothscale(img, (SYM_W, SYM_H // 5)),
+                                                    (SYM_W, int(SYM_H * 1.3))) for n, img in sym.items()}
+            return sym, blur
+        sym, blur = themed(("slot_symbols",), make)
+        return blur if blurred else sym
+
+    def theme_bg(self):
+        if not CURRENT_THEME:
+            return self.bg
+        return themed(("slots_bg",), lambda: make_slots_bg(
+            {n: pygame.transform.smoothscale(img, (42, 32)) for n, img in self.symbols(False).items()}))
+
     def add_chip(self, v):
         if self.bet + v > self.app.balance:
             self.message = "NOT ENOUGH CHIPS FOR THAT BET"
@@ -2510,7 +2536,7 @@ class Slots:
 
     def draw(self, surf):
         mouse = pygame.mouse.get_pos()
-        surf.blit(self.bg, (0, 0))
+        surf.blit(self.theme_bg(), (0, 0))
 
         # marquee bulbs
         speed = 14 if self.state == "spinning" or self.big else 5
@@ -2531,7 +2557,7 @@ class Slots:
                 blurred = self.spin_t / self.anim[i][2] < 0.75
             for j in range(-1, 4):
                 name = self.strips[i][(base + j) % self.L]
-                img = (self.blur if blurred else self.sym)[name]
+                img = self.symbols(blurred)[name]
                 cy = REEL_Y + (j - frac) * ROW_H + ROW_H / 2
                 surf.blit(img, img.get_rect(center=(rect.centerx, cy)))
             surf.set_clip(None)
@@ -3633,7 +3659,6 @@ class Poker:
         self.app = app
         self.assets = app.assets
         self.bg = make_poker_bg()
-        self.small_back = pygame.transform.smoothscale(self.assets.back, (54, 76))
         self.small_faces = {}
         self.you = Seat("YOU", 0, bot=False)
         self.seats = [self.you]
@@ -4044,7 +4069,8 @@ class Poker:
         cx, cy = SEAT_CARDS[i]
         if s.bot and s.cards and not s.folded:
             for j, card in enumerate(s.cards):
-                img = self.small_face(card) if self.reveal else self.small_back
+                img = self.small_face(card) if self.reveal else themed(
+                    ("small_back",), lambda: pygame.transform.smoothscale(self.assets.back, (54, 76)))
                 surf.blit(img, img.get_rect(center=(cx - 16 + j * 32, cy)))
         # panel
         turn = self.phase == "hand" and self.to_act == i and s.can_act
@@ -5417,18 +5443,23 @@ _die_cache = {}
 
 
 def make_die(value, size):
-    key = (value, size)
+    key = (value, size, CURRENT_THEME)
     if key not in _die_cache:
+        edge, face, shine, pip = DIE_THEME.get(CURRENT_THEME, ((130, 10, 20), (215, 30, 40), (235, 80, 85),
+                                                                (250, 250, 250)))
         k = 3
         S = size * k
         s = pygame.Surface((S, S), pygame.SRCALPHA)
-        pygame.draw.rect(s, (130, 10, 20), (0, 0, S, S), border_radius=int(S * 0.2))
-        pygame.draw.rect(s, (215, 30, 40), (k, k, S - 2 * k, S - 2 * k), border_radius=int(S * 0.18))
-        pygame.draw.rect(s, (235, 80, 85), (S * 0.12, S * 0.08, S * 0.5, S * 0.18), border_radius=int(S * 0.08))
+        pygame.draw.rect(s, edge, (0, 0, S, S), border_radius=int(S * 0.2))
+        pygame.draw.rect(s, face, (k, k, S - 2 * k, S - 2 * k), border_radius=int(S * 0.18))
+        pygame.draw.rect(s, shine, (S * 0.12, S * 0.08, S * 0.5, S * 0.18), border_radius=int(S * 0.08))
         for px, py in PIP_SPOTS[value]:
             c = (S / 2 + px * S * 0.27, S / 2 + py * S * 0.27)
-            pygame.draw.circle(s, (120, 10, 15), (c[0] + k * 0.6, c[1] + k * 0.6), S * 0.085)
-            pygame.draw.circle(s, (250, 250, 250), c, S * 0.085)
+            if CURRENT_THEME == "valentines":                    # little heart pips
+                draw_heart(s, c[0], c[1], S * 0.085, pip)
+                continue
+            pygame.draw.circle(s, darken(edge, 20), (c[0] + k * 0.6, c[1] + k * 0.6), S * 0.085)
+            pygame.draw.circle(s, pip, c, S * 0.085)
         _die_cache[key] = pygame.transform.smoothscale(s, (size, size))
     return _die_cache[key]
 
@@ -6787,6 +6818,8 @@ class Plinko(StakeGame):
                       (30, 10, 20), r.center)
         for b in self.balls:
             x, y = self.ball_pos(b)
+            if draw_theme_ball(surf, x, y, 10):
+                continue
             pygame.draw.circle(surf, darken(b["col"], 90), (x + 1, y + 2), 9)
             pygame.draw.circle(surf, b["col"], (x, y), 9)
             pygame.draw.circle(surf, WHITE, (x - 3, y - 3), 3)
@@ -6975,9 +7008,11 @@ class Mines(StakeGame):
             pygame.draw.rect(surf, col, r, border_radius=12)
             pygame.draw.rect(surf, (80, 90, 140) if picked else (40, 45, 70), r, width=2, border_radius=12)
             if is_mine:
-                draw_bomb(surf, r.centerx, r.centery + 4, 20 if picked else 15)
+                if not draw_theme_bomb(surf, r.centerx, r.centery + 4, 20 if picked else 15):
+                    draw_bomb(surf, r.centerx, r.centery + 4, 20 if picked else 15)
             else:
-                img = self.gem if picked else pygame.transform.smoothscale(self.gem, (40, 31))
+                gem = theme_gem((52, 52) if picked else (38, 38)) if CURRENT_THEME else None
+                img = gem or (self.gem if picked else pygame.transform.smoothscale(self.gem, (40, 31)))
                 surf.blit(img, img.get_rect(center=r.center))
             if not picked:
                 dim = pygame.Surface(r.size, pygame.SRCALPHA)
@@ -7047,7 +7082,6 @@ class VideoPoker(StakeGame):
         super().__init__(app, ((6, 10, 30), (50, 70, 130)))
         self.bg = gradient_bg((12, 24, 70), (4, 6, 20))
         self.big = {}
-        self.big_back = pygame.transform.smoothscale(self.assets.back, (VP_CW, VP_CH))
         self.deck = []
         self.hand = []
         self.held = [False] * 5
@@ -7199,7 +7233,8 @@ class VideoPoker(StakeGame):
             if not self.hand:
                 pygame.draw.rect(surf, (30, 40, 90), (x, y, VP_CW, VP_CH), width=2, border_radius=12)
                 continue
-            img = self.face_img(self.hand[i]) if self.face[i] else self.big_back
+            img = self.face_img(self.hand[i]) if self.face[i] else themed(
+                ("big_back",), lambda: pygame.transform.smoothscale(self.assets.back, (VP_CW, VP_CH)))
             w = VP_CW
             if self.flip[i] is not None:
                 w = max(2, int(VP_CW * abs(math.cos(math.pi * self.flip[i]))))
@@ -9633,7 +9668,8 @@ class Pinball(StakeGame):
         if self.busy():
             by = self.by + (pull if self.state == "plunger" else 0)
             pygame.draw.circle(surf, (40, 40, 60), (self.bx + 2, by + 3), PB_BALL_R)
-            pygame.draw.circle(surf, (225, 228, 235), (self.bx, by), PB_BALL_R)
+            if not draw_theme_ball(surf, self.bx, by, PB_BALL_R + 1):
+                pygame.draw.circle(surf, (225, 228, 235), (self.bx, by), PB_BALL_R)
             pygame.draw.circle(surf, WHITE, (self.bx - 3, by - 3), 3)
         for text, x, y, life in self.pops:
             img = font(16 if text.startswith("+") else 22, bold=True).render(text, True, (255, 230, 120))
@@ -10283,6 +10319,7 @@ def draw_chicken(surf, x, y, face=(1, 0), squash=1.0, scale=1.0):
         pygame.draw.circle(surf, (20, 20, 20), (x + ex * k + fx * 6 * k, y - 6 * k + fy * 4 * k), 3 * k)
     if squash >= 1:
         pygame.draw.rect(surf, (230, 60, 60), (x - 4 * k, y + 5 * k, 8 * k, 6 * k), border_radius=2)
+        draw_chicken_costume(surf, x, y, k, body.top)
 
 
 class Crossy(StakeGame):
@@ -10590,7 +10627,10 @@ class Crossy(StakeGame):
         top = cy - CR_T / 2
         kind = row["kind"]
         if kind == "grass":
-            pygame.draw.rect(surf, (104, 186, 76) if r % 2 else (96, 176, 70), (0, top, W, CR_T + 1))
+            grass = {"winter": ((232, 240, 250), (220, 232, 245)), "halloween": ((74, 110, 58), (66, 100, 52)),
+                     "easter": ((130, 210, 110), (120, 200, 100)), "summer": ((236, 214, 150), (226, 204, 140))
+                     }.get(CURRENT_THEME, ((104, 186, 76), (96, 176, 70)))
+            pygame.draw.rect(surf, grass[0] if r % 2 else grass[1], (0, top, W, CR_T + 1))
             for c in (0, CR_COLS - 1):
                 pygame.draw.rect(surf, (60, 120, 50), (c * CR_T + 4, top + 6, CR_T - 8, CR_T - 12), border_radius=18)
             for c in row["trees"]:
@@ -10598,6 +10638,8 @@ class Crossy(StakeGame):
                 pygame.draw.ellipse(surf, (60, 110, 45), (x - 24, cy + 6, 48, 18))
                 pygame.draw.rect(surf, (110, 70, 40), (x - 6, cy - 2, 12, 22), border_radius=3)
                 pygame.draw.rect(surf, (40, 130, 60), (x - 22, cy - 30, 44, 36), border_radius=12)
+                if CURRENT_THEME == "winter":
+                    pygame.draw.rect(surf, (245, 250, 255), (x - 20, cy - 30, 40, 12), border_radius=8)
                 pygame.draw.rect(surf, (70, 165, 85), (x - 16, cy - 26, 26, 16), border_radius=8)
         elif kind == "road":
             pygame.draw.rect(surf, (62, 62, 70), (0, top, W, CR_T + 1))
@@ -10644,7 +10686,8 @@ class Crossy(StakeGame):
 
     def draw(self, surf):
         mouse = pygame.mouse.get_pos()
-        surf.fill((96, 176, 70))
+        surf.fill({"winter": (220, 232, 245), "halloween": (66, 100, 52), "easter": (120, 200, 100),
+                   "summer": (226, 204, 140)}.get(CURRENT_THEME, (96, 176, 70)))
         surf.set_clip(pygame.Rect(0, 56, W, 574))
         lo = max(0, int(self.cam) - 2)
         hi = min(len(self.rows), int(self.cam) + 10)
@@ -11165,22 +11208,28 @@ CUP_LIFT = 110
 def draw_cup(surf, x, y, scale=1.0):
     """A red cup, upside down, standing with its rim at (x, y)."""
     k = scale
+    body_c, shine_c, stripe_c, rim_d, rim_l, base_c = CUP_THEME.get(CURRENT_THEME, (
+        (150, 25, 30), (215, 70, 70), (245, 215, 120), (120, 18, 24), (175, 40, 45), (110, 15, 20)))
     top_w, bot_w, h = 70 * k, 118 * k, 128 * k
     body = [(x - bot_w / 2, y), (x - top_w / 2, y - h), (x + top_w / 2, y - h), (x + bot_w / 2, y)]
-    pygame.draw.polygon(surf, (150, 25, 30), body)
+    pygame.draw.polygon(surf, body_c, body)
     shine = [(x - bot_w / 2 + 16 * k, y - 6 * k), (x - top_w / 2 + 10 * k, y - h + 8 * k),
              (x - top_w / 2 + 24 * k, y - h + 8 * k), (x - bot_w / 2 + 34 * k, y - 6 * k)]
-    pygame.draw.polygon(surf, (215, 70, 70), shine)
+    pygame.draw.polygon(surf, shine_c, shine)
     for f in (0.3, 0.62):
         w = top_w + (bot_w - top_w) * (1 - f)
-        pygame.draw.line(surf, (245, 215, 120), (x - w / 2 + 2, y - h * f), (x + w / 2 - 2, y - h * f), max(2, int(5 * k)))
-    pygame.draw.ellipse(surf, (120, 18, 24), (x - top_w / 2, y - h - 9 * k, top_w, 18 * k))
-    pygame.draw.ellipse(surf, (175, 40, 45), (x - top_w / 2 + 4 * k, y - h - 7 * k, top_w - 8 * k, 13 * k))
-    pygame.draw.rect(surf, (110, 15, 20), (x - bot_w / 2 - 4 * k, y - 10 * k, bot_w + 8 * k, 12 * k),
+        pygame.draw.line(surf, stripe_c, (x - w / 2 + 2, y - h * f), (x + w / 2 - 2, y - h * f), max(2, int(5 * k)))
+    pygame.draw.ellipse(surf, rim_d, (x - top_w / 2, y - h - 9 * k, top_w, 18 * k))
+    pygame.draw.ellipse(surf, rim_l, (x - top_w / 2 + 4 * k, y - h - 7 * k, top_w - 8 * k, 13 * k))
+    pygame.draw.rect(surf, base_c, (x - bot_w / 2 - 4 * k, y - 10 * k, bot_w + 8 * k, 12 * k),
                      border_radius=int(6 * k))
+    if CURRENT_THEME:                                    # a little seasonal emblem on the cup
+        theme_icon(surf, CURRENT_THEME, x, y - h * 0.46, 11 * k)
 
 
 def draw_cup_ball(surf, x, y, r=20):
+    if draw_theme_ball(surf, x, y, r):
+        return
     pygame.draw.circle(surf, (0, 0, 0), (x + 3, y + 4), r)
     pygame.draw.circle(surf, (235, 190, 50), (x, y), r)
     pygame.draw.circle(surf, (255, 240, 170), (x - r * 0.35, y - r * 0.35), r * 0.35)
@@ -14388,7 +14437,9 @@ class CoinFlip(StakeGame):
             for k in range(rim.y + 6, rim.bottom - 4, 8):
                 pygame.draw.line(surf, (210, 160, 40), (rim.x + 3, k), (rim.right - 3, k), 3)
             return
-        face = self.faces["heads" if c >= 0 else "tails"]
+        kind = "heads" if c >= 0 else "tails"
+        face = themed(("coin", kind), lambda: make_theme_coin_face(kind, FLIP_R, CURRENT_THEME)) \
+            if CURRENT_THEME else self.faces[kind]
         h = max(6, int(2 * FLIP_R * thin))
         rim_h = int(10 * (1 - thin)) + 3
         pygame.draw.ellipse(surf, (120, 80, 10), (x - FLIP_R, y - h / 2 + rim_h, 2 * FLIP_R, h))
@@ -15538,10 +15589,12 @@ class ThemeFX:
         return p
 
     def update(self, dt):
+        global CURRENT_THEME
         self.t += dt
         name = self.current()
         if name != self.name:
             self.reset(name)
+        CURRENT_THEME = self.name                 # the games dress their pieces up for the season
         for i, p in enumerate(self.parts):
             p["x"] += (p["vx"] + (math.sin(self.t * 1.3 + p["ph"]) * 18 if self.name in ("winter", "easter") else 0)) * dt
             p["y"] += p["vy"] * dt
@@ -15820,6 +15873,378 @@ class OwnerMenu:
             bad = "ONLY" in ev.owner_msg or "FAILED" in ev.owner_msg or "CAN'T" in ev.owner_msg or "ISN'T" in ev.owner_msg
             draw_text(surf, ev.owner_msg, font(15, bold=True), (240, 130, 130) if bad else (140, 230, 160),
                       (P.centerx, P.bottom - 24))
+
+
+# --------------------------------------------------------------------------
+# Seasonal game pieces: card backs, balls, coins, dice, slot symbols, gems and mines, the chicken's costume
+# --------------------------------------------------------------------------
+CURRENT_THEME = ""            # the seasonal look showing right now (set every frame by ThemeFX)
+_theme_cache = {}
+
+
+def themed(key, make):
+    """A seasonal picture, made once per theme and kept."""
+    k = (CURRENT_THEME,) + tuple(key)
+    if k not in _theme_cache:
+        _theme_cache[k] = make()
+    return _theme_cache[k]
+
+
+def theme_icon(surf, theme, cx, cy, r, alt=False):
+    """Each season's two emblems: pumpkin/bat, snowflake/snowman, heart/rose, egg/bunny, sun/palm tree."""
+    if theme == "halloween" and not alt:                          # jack-o'-lantern
+        pygame.draw.ellipse(surf, (230, 115, 20), (cx - r, cy - r * 0.8, 2 * r, 1.7 * r))
+        for dx in (-0.45, 0.45):
+            pygame.draw.ellipse(surf, (205, 95, 10), (cx + dx * r - r * 0.25, cy - r * 0.8, r * 0.5, 1.7 * r), 2)
+        pygame.draw.rect(surf, (80, 120, 30), (cx - r * 0.12, cy - r * 1.05, r * 0.24, r * 0.32))
+        for ex in (-0.38, 0.38):
+            pygame.draw.polygon(surf, (50, 20, 0), [(cx + ex * r - r * 0.16, cy - r * 0.05), (cx + ex * r + r * 0.16, cy - r * 0.05),
+                                                   (cx + ex * r, cy - r * 0.35)])
+        pygame.draw.polygon(surf, (50, 20, 0), [(cx - r * 0.5, cy + r * 0.25), (cx + r * 0.5, cy + r * 0.25),
+                                               (cx + r * 0.3, cy + r * 0.5), (cx - r * 0.3, cy + r * 0.5)])
+    elif theme == "halloween":                                    # bat
+        body = (25, 15, 30)
+        pygame.draw.ellipse(surf, body, (cx - r * 0.25, cy - r * 0.35, r * 0.5, r * 0.75))
+        for side in (-1, 1):
+            pygame.draw.polygon(surf, body, [(cx + side * r * 0.15, cy - r * 0.2), (cx + side * r, cy - r * 0.55),
+                                             (cx + side * r * 0.8, cy + r * 0.05), (cx + side * r * 0.55, cy - r * 0.05),
+                                             (cx + side * r * 0.4, cy + r * 0.3), (cx + side * r * 0.2, cy + r * 0.2)])
+            pygame.draw.polygon(surf, body, [(cx + side * r * 0.05, cy - r * 0.3), (cx + side * r * 0.22, cy - r * 0.55),
+                                             (cx + side * r * 0.2, cy - r * 0.25)])
+        for side in (-1, 1):
+            pygame.draw.circle(surf, (255, 170, 40), (cx + side * r * 0.1, cy - r * 0.15), max(1, r * 0.07))
+    elif theme == "winter" and not alt:                           # snowflake
+        for k in range(6):
+            a = k * math.pi / 3
+            ex, ey = cx + math.cos(a) * r, cy + math.sin(a) * r
+            pygame.draw.line(surf, (235, 248, 255), (cx, cy), (ex, ey), max(2, int(r * 0.12)))
+            mx, my = cx + math.cos(a) * r * 0.6, cy + math.sin(a) * r * 0.6
+            for side in (-0.7, 0.7):
+                pygame.draw.line(surf, (235, 248, 255), (mx, my), (mx + math.cos(a + side) * r * 0.35,
+                                                                   my + math.sin(a + side) * r * 0.35), max(1, int(r * 0.08)))
+    elif theme == "winter":                                       # snowman
+        for rr, yy in ((0.55, 0.4), (0.4, -0.35)):
+            pygame.draw.circle(surf, (250, 252, 255), (cx, cy + yy * r), rr * r)
+            pygame.draw.circle(surf, (190, 205, 225), (cx, cy + yy * r), rr * r, 2)
+        pygame.draw.rect(surf, (25, 25, 35), (cx - r * 0.28, cy - r * 1.05, r * 0.56, r * 0.35))
+        pygame.draw.rect(surf, (25, 25, 35), (cx - r * 0.42, cy - r * 0.74, r * 0.84, r * 0.1))
+        pygame.draw.polygon(surf, (240, 130, 30), [(cx, cy - r * 0.35), (cx + r * 0.35, cy - r * 0.3), (cx, cy - r * 0.25)])
+    elif theme == "valentines" and not alt:
+        draw_heart(surf, cx, cy - r * 0.1, r * 0.95, (225, 35, 75))
+        pygame.draw.circle(surf, (255, 150, 180), (cx - r * 0.45, cy - r * 0.45), r * 0.18)
+    elif theme == "valentines":                                   # rose
+        pygame.draw.line(surf, (40, 130, 50), (cx, cy), (cx, cy + r), max(2, int(r * 0.12)))
+        pygame.draw.ellipse(surf, (50, 150, 60), (cx, cy + r * 0.35, r * 0.5, r * 0.25))
+        pygame.draw.circle(surf, (195, 20, 55), (cx, cy - r * 0.2), r * 0.6)
+        pygame.draw.circle(surf, (235, 60, 95), (cx - r * 0.1, cy - r * 0.3), r * 0.38)
+        pygame.draw.arc(surf, (150, 10, 40), (cx - r * 0.35, cy - r * 0.55, r * 0.7, r * 0.6), 0.3, 3.5, 2)
+    elif theme == "easter" and not alt:                           # painted egg
+        rect = pygame.Rect(0, 0, r * 1.5, r * 1.95)
+        rect.center = (cx, cy)
+        pygame.draw.ellipse(surf, (255, 185, 215), rect)
+        for k, col in ((0.38, (150, 200, 255)), (0.62, (255, 235, 120))):
+            y = rect.y + rect.h * k
+            pts = [(rect.x + rect.w * (i / 8), y + (4 if i % 2 else -4) * r / 30) for i in range(9)]
+            pygame.draw.lines(surf, col, False, pts, max(2, int(r * 0.14)))
+        pygame.draw.ellipse(surf, (230, 150, 185), rect, 2)
+    elif theme == "easter":                                       # bunny
+        for ex in (-0.3, 0.3):
+            pygame.draw.ellipse(surf, (250, 250, 250), (cx + ex * r - r * 0.17, cy - r * 1.15, r * 0.34, r * 0.9))
+            pygame.draw.ellipse(surf, (255, 190, 210), (cx + ex * r - r * 0.08, cy - r * 1.0, r * 0.16, r * 0.62))
+        pygame.draw.circle(surf, (250, 250, 250), (cx, cy + r * 0.1), r * 0.62)
+        for ex in (-0.22, 0.22):
+            pygame.draw.circle(surf, (30, 30, 30), (cx + ex * r, cy), max(1, r * 0.08))
+        pygame.draw.circle(surf, (255, 140, 170), (cx, cy + r * 0.15), max(1, r * 0.09))
+    elif theme == "summer" and not alt:                           # sun
+        for k in range(10):
+            a = k * math.pi / 5
+            pygame.draw.line(surf, (255, 200, 40), (cx + math.cos(a) * r * 0.62, cy + math.sin(a) * r * 0.62),
+                             (cx + math.cos(a) * r, cy + math.sin(a) * r), max(2, int(r * 0.12)))
+        pygame.draw.circle(surf, (255, 215, 70), (cx, cy), r * 0.55)
+        pygame.draw.circle(surf, (255, 240, 150), (cx - r * 0.15, cy - r * 0.15), r * 0.22)
+    elif theme == "summer":                                       # palm tree
+        pts = [(cx - r * 0.1 + (k / 10) ** 2 * r * 0.35, cy + r - k * r * 0.16) for k in range(11)]
+        pygame.draw.lines(surf, (130, 85, 40), False, pts, max(3, int(r * 0.16)))
+        tx, ty = pts[-1]
+        for a in range(0, 360, 60):
+            ang = math.radians(a + 20)
+            pygame.draw.line(surf, (40, 150, 60), (tx, ty), (tx + math.cos(ang) * r * 0.8,
+                                                            ty + math.sin(ang) * r * 0.4 + r * 0.12), max(2, int(r * 0.13)))
+        pygame.draw.circle(surf, (110, 70, 30), (tx - r * 0.05, ty + r * 0.1), r * 0.1)
+
+
+# ---- card backs -----------------------------------------------------------------------
+THEME_BACK = {"halloween": ((50, 20, 60), (255, 140, 20)), "winter": ((25, 55, 110), (220, 240, 255)),
+              "valentines": ((170, 20, 55), (255, 190, 210)), "easter": ((150, 120, 210), (255, 240, 170)),
+              "summer": ((20, 150, 180), (255, 220, 90))}
+
+
+def make_themed_back(theme):
+    k = SS
+    w, h = CW * k, CH * k
+    s = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(s, (250, 250, 246), (0, 0, w, h), border_radius=8 * k)
+    pygame.draw.rect(s, (170, 170, 165), (0, 0, w, h), width=k, border_radius=8 * k)
+    m = 5 * k
+    bg, trim = THEME_BACK[theme]
+    pat = pygame.Surface((w - 2 * m, h - 2 * m), pygame.SRCALPHA)
+    pat.fill((*bg, 255))
+    iw, ih = pat.get_size()
+    step = 14 * k
+    for row, y in enumerate(range(step // 2, ih, step)):
+        for x in range(step // 2 + (row % 2) * step // 2, iw, step):
+            theme_icon(pat, theme, x, y, 3.6 * k, alt=(row % 2 == 1))
+    pygame.draw.rect(pat, trim, pat.get_rect().inflate(-6 * k, -6 * k), width=k, border_radius=4 * k)
+    pygame.draw.circle(pat, bg, (iw / 2, ih / 2), 17 * k)
+    pygame.draw.circle(pat, trim, (iw / 2, ih / 2), 17 * k, width=k)
+    theme_icon(pat, theme, iw / 2, ih / 2, 11 * k)
+    mask = pygame.Surface((iw, ih), pygame.SRCALPHA)
+    pygame.draw.rect(mask, (255, 255, 255, 255), mask.get_rect(), border_radius=5 * k)
+    pat.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+    s.blit(pat, (m, m))
+    return pygame.transform.smoothscale(s, (CW, CH))
+
+
+# ---- balls (cups, plinko, pinball, roulette) -------------------------------------------
+def draw_theme_ball(surf, x, y, r):
+    """Draw the season's ball instead of a plain one. Returns False when no theme is on."""
+    t = CURRENT_THEME
+    if not t:
+        return False
+
+    def make():
+        R = int(r * 3)
+        s = pygame.Surface((R * 2 + 8, R * 2 + 8), pygame.SRCALPHA)
+        c = R + 4
+        if t == "halloween":
+            theme_icon(s, t, c, c + R * 0.1, R)
+        elif t == "winter":
+            pygame.draw.circle(s, (225, 238, 250), (c, c), R)
+            pygame.draw.circle(s, (250, 253, 255), (c - R * 0.15, c - R * 0.15), R * 0.8)
+            for dx, dy in ((0.3, 0.2), (-0.35, 0.3), (0.1, -0.4)):
+                pygame.draw.circle(s, (205, 222, 240), (c + dx * R, c + dy * R), R * 0.12)
+        elif t == "valentines":
+            draw_heart(s, c, c - R * 0.12, R, (225, 35, 75))
+            pygame.draw.circle(s, (255, 170, 195), (c - R * 0.42, c - R * 0.42), R * 0.2)
+        elif t == "easter":
+            theme_icon(s, t, c, c, R * 1.02)
+        else:                                                   # beach ball
+            for i, col in enumerate(((230, 60, 60), (255, 255, 255), (60, 130, 230), (255, 210, 60))):
+                pygame.draw.circle(s, col, (c, c), R, draw_top_left=i == 0, draw_top_right=i == 1,
+                                   draw_bottom_left=i == 3, draw_bottom_right=i == 2)
+            pygame.draw.circle(s, (255, 255, 255), (c, c), R * 0.18)
+            pygame.draw.circle(s, (40, 40, 50), (c, c), R, 2)
+        return pygame.transform.smoothscale(s, (int(r * 2 + 3), int(r * 2 + 3)))
+
+    img = themed(("ball", int(r)), make)
+    surf.blit(img, img.get_rect(center=(x, y)))
+    return True
+
+
+# ---- cups ---------------------------------------------------------------------------------
+CUP_THEME = {   # body, shine, stripes, rim (dark), rim (light), base
+    "halloween": ((215, 105, 15), (250, 160, 60), (30, 15, 30), (150, 70, 10), (235, 130, 40), (120, 55, 5)),
+    "winter": ((60, 120, 200), (130, 180, 240), (245, 250, 255), (35, 80, 150), (90, 150, 220), (30, 70, 130)),
+    "valentines": ((230, 80, 130), (255, 150, 185), (255, 240, 245), (170, 40, 90), (245, 120, 160), (150, 30, 75)),
+    "easter": ((165, 135, 225), (205, 185, 250), (255, 240, 150), (120, 95, 180), (185, 160, 240), (105, 80, 160)),
+    "summer": ((30, 165, 195), (110, 215, 235), (255, 220, 80), (20, 115, 140), (60, 190, 215), (15, 100, 125)),
+}
+
+# ---- coin flip faces ----------------------------------------------------------------------
+COIN_THEME = {   # rim, face dark, face light, ring, ink
+    "halloween": ((140, 60, 10), (225, 120, 30), (255, 185, 90), (170, 80, 15), (60, 25, 5)),
+    "winter": ((110, 130, 160), (190, 210, 235), (240, 248, 255), (140, 165, 200), (40, 70, 120)),
+    "valentines": ((150, 40, 75), (235, 120, 155), (255, 195, 215), (190, 70, 110), (110, 15, 50)),
+    "easter": ((150, 125, 200), (215, 195, 250), (250, 240, 255), (175, 150, 225), (90, 60, 140)),
+    "summer": ((170, 110, 20), (240, 190, 60), (255, 235, 140), (200, 140, 30), (120, 70, 10)),
+}
+
+
+def make_theme_coin_face(kind, r, theme):
+    rim, dark, light, ring, ink = COIN_THEME[theme]
+    k = 2
+    R = r * k
+    s = pygame.Surface((2 * R, 2 * R), pygame.SRCALPHA)
+    pygame.draw.circle(s, rim, (R, R), R)
+    for i in range(20):
+        t = i / 19
+        pygame.draw.circle(s, lerp_col(dark, light, t), (R - t * R * 0.15, R - t * R * 0.15), int(R * 0.94 * (1 - t * 0.25)))
+    pygame.draw.circle(s, ring, (R, R), int(R * 0.80), 3 * k)
+    for i in range(48):
+        a = i / 48 * 2 * math.pi
+        pygame.draw.line(s, ring, (R + math.cos(a) * R * 0.9, R + math.sin(a) * R * 0.9),
+                         (R + math.cos(a) * R * 0.99, R + math.sin(a) * R * 0.99), 2 * k)
+    theme_icon(s, theme, R, R - R * 0.1, R * 0.42, alt=(kind == "tails"))
+    draw_text(s, kind.upper(), font(R * 0.22, bold=True, serif=True), ink, (R, R + R * 0.55))
+    return pygame.transform.smoothscale(s, (2 * r, 2 * r))
+
+
+# ---- dice -----------------------------------------------------------------------------------
+DIE_THEME = {   # edge, face, shine, pips
+    "halloween": ((130, 55, 5), (230, 115, 20), (250, 160, 70), (30, 10, 30)),
+    "winter": ((120, 150, 190), (225, 238, 252), (250, 253, 255), (30, 70, 140)),
+    "valentines": ((160, 30, 70), (240, 110, 150), (255, 170, 200), (255, 255, 255)),
+    "easter": ((130, 105, 190), (195, 175, 245), (225, 210, 255), (255, 240, 130)),
+    "summer": ((15, 110, 135), (40, 185, 210), (120, 225, 240), (255, 255, 255)),
+}
+
+# ---- slot machine: three of the fruit become seasonal (same payouts) --------------------------
+THEME_SLOTS = {"halloween": {"cherry": "candycorn", "lemon": "pumpkin", "orange": "ghost"},
+               "winter": {"cherry": "candycane", "lemon": "snowflake", "orange": "snowman"},
+               "valentines": {"cherry": "heart", "lemon": "rose", "orange": "letter"},
+               "easter": {"cherry": "egg", "lemon": "chick", "orange": "carrot"},
+               "summer": {"cherry": "watermelon", "lemon": "sun", "orange": "beachball"}}
+
+
+def make_theme_symbol(kind):
+    k = 2
+    w, h = SYM_W * k, SYM_H * k
+    s = pygame.Surface((w, h), pygame.SRCALPHA)
+    cx, cy, r = w / 2, h / 2, h * 0.38
+    if kind == "candycorn":
+        pts = [(cx - r * 0.8, cy + r * 0.8), (cx + r * 0.8, cy + r * 0.8), (cx, cy - r)]
+        pygame.draw.polygon(s, (255, 250, 235), pts)
+        pygame.draw.polygon(s, (250, 160, 30), [(cx - r * 0.55, cy + r * 0.25), (cx + r * 0.55, cy + r * 0.25),
+                                                (cx + r * 0.8, cy + r * 0.8), (cx - r * 0.8, cy + r * 0.8)])
+        pygame.draw.polygon(s, (255, 215, 60), [(cx - r * 0.28, cy - r * 0.35), (cx + r * 0.28, cy - r * 0.35),
+                                                (cx + r * 0.55, cy + r * 0.25), (cx - r * 0.55, cy + r * 0.25)])
+    elif kind == "ghost":
+        pygame.draw.circle(s, (245, 245, 255), (cx, cy - r * 0.2), r * 0.7)
+        pygame.draw.rect(s, (245, 245, 255), (cx - r * 0.7, cy - r * 0.2, r * 1.4, r * 0.9))
+        for i in range(4):
+            pygame.draw.circle(s, (245, 245, 255), (cx - r * 0.52 + i * r * 0.35, cy + r * 0.7), r * 0.18)
+        for ex in (-0.25, 0.25):
+            pygame.draw.ellipse(s, (30, 30, 40), (cx + ex * r - r * 0.1, cy - r * 0.4, r * 0.2, r * 0.28))
+        pygame.draw.ellipse(s, (30, 30, 40), (cx - r * 0.12, cy, r * 0.24, r * 0.2))
+    elif kind == "candycane":
+        for i in range(14):
+            t = i / 13
+            x = cx + r * 0.2
+            y = cy + r * 0.9 - t * r * 1.2
+            pygame.draw.circle(s, (230, 30, 40) if (i // 2) % 2 else (255, 255, 255), (x, y), r * 0.16)
+        for i in range(12):
+            a = math.pi - i / 11 * math.pi
+            pygame.draw.circle(s, (230, 30, 40) if (i // 2) % 2 else (255, 255, 255),
+                               (cx - r * 0.18 + math.cos(a) * r * 0.38, cy - r * 0.3 - math.sin(a) * r * 0.38), r * 0.16)
+    elif kind == "letter":
+        env = pygame.Rect(0, 0, r * 1.9, r * 1.25)
+        env.center = (cx, cy)
+        pygame.draw.rect(s, (255, 245, 235), env, border_radius=int(r * 0.08))
+        pygame.draw.lines(s, (220, 190, 180), False, [env.topleft, env.center, env.topright], 4)
+        draw_heart(s, cx, cy + r * 0.05, r * 0.3, (220, 30, 70))
+    elif kind == "chick":
+        pygame.draw.circle(s, (255, 220, 60), (cx, cy + r * 0.2), r * 0.7)
+        pygame.draw.circle(s, (255, 228, 90), (cx + r * 0.1, cy - r * 0.45), r * 0.45)
+        pygame.draw.polygon(s, (240, 140, 30), [(cx + r * 0.5, cy - r * 0.5), (cx + r * 0.85, cy - r * 0.4),
+                                                (cx + r * 0.5, cy - r * 0.3)])
+        pygame.draw.circle(s, (30, 30, 30), (cx + r * 0.25, cy - r * 0.55), r * 0.08)
+    elif kind == "carrot":
+        pygame.draw.polygon(s, (240, 130, 30), [(cx - r * 0.35, cy - r * 0.55), (cx + r * 0.35, cy - r * 0.55),
+                                                (cx, cy + r)])
+        for dy in (-0.2, 0.15, 0.5):
+            pygame.draw.line(s, (200, 95, 20), (cx - r * 0.2, cy + dy * r), (cx + r * 0.05, cy + dy * r), 3)
+        for a in (-0.5, 0, 0.5):
+            pygame.draw.line(s, (60, 160, 60), (cx, cy - r * 0.55), (cx + a * r * 0.8, cy - r), 7)
+    elif kind == "watermelon":
+        pygame.draw.circle(s, (40, 140, 60), (cx, cy - r * 0.2), r, draw_bottom_left=True, draw_bottom_right=True)
+        pygame.draw.circle(s, (240, 60, 80), (cx, cy - r * 0.2), r * 0.82, draw_bottom_left=True, draw_bottom_right=True)
+        for i in range(5):
+            a = math.pi * (0.2 + i * 0.15)
+            pygame.draw.ellipse(s, (30, 20, 20), (cx + math.cos(a) * r * 0.5 - 4, cy - r * 0.2 + math.sin(a) * r * 0.45, 8, 12))
+    elif kind in ("pumpkin", "snowflake", "snowman", "heart", "rose", "egg", "sun"):
+        theme_of = {"pumpkin": ("halloween", False), "snowflake": ("winter", False), "snowman": ("winter", True),
+                    "heart": ("valentines", False), "rose": ("valentines", True), "egg": ("easter", False),
+                    "sun": ("summer", False)}[kind]
+        if kind == "snowflake":                               # snowflakes need a darker outline on white reels
+            for k2 in range(6):
+                a = k2 * math.pi / 3
+                pygame.draw.line(s, (80, 140, 210), (cx, cy), (cx + math.cos(a) * r, cy + math.sin(a) * r), 10)
+        if kind == "snowman":                                 # ...and so does the snowman
+            for rr, yy in ((0.55, 0.4), (0.4, -0.35)):
+                pygame.draw.circle(s, (90, 130, 190), (cx, cy + yy * r), rr * r + 5)
+        theme_icon(s, theme_of[0], cx, cy, r, alt=theme_of[1])
+        if kind == "snowman":                                 # a red scarf
+            pygame.draw.rect(s, (210, 40, 50), (cx - r * 0.38, cy - r * 0.05, r * 0.76, r * 0.14), border_radius=6)
+    elif kind == "beachball":
+        for i, col in enumerate(((230, 60, 60), (255, 255, 255), (60, 130, 230), (255, 210, 60))):
+            pygame.draw.circle(s, col, (cx, cy), r, draw_top_left=i == 0, draw_top_right=i == 1,
+                               draw_bottom_left=i == 3, draw_bottom_right=i == 2)
+        pygame.draw.circle(s, (40, 40, 50), (cx, cy), r, 3)
+    return pygame.transform.smoothscale(s, (SYM_W, SYM_H))
+
+
+# ---- mines: seasonal gems and seasonal "mines" ------------------------------------------------
+def draw_theme_bomb(surf, cx, cy, r):
+    t = CURRENT_THEME
+    if not t:
+        return False
+    if t == "halloween":                                       # skull
+        pygame.draw.circle(surf, (235, 230, 220), (cx, cy - r * 0.15), r * 0.85)
+        pygame.draw.rect(surf, (235, 230, 220), (cx - r * 0.5, cy + r * 0.3, r, r * 0.5), border_radius=4)
+        for ex in (-0.35, 0.35):
+            pygame.draw.circle(surf, (20, 10, 20), (cx + ex * r, cy - r * 0.15), r * 0.24)
+        pygame.draw.polygon(surf, (20, 10, 20), [(cx, cy + r * 0.05), (cx - r * 0.12, cy + r * 0.28), (cx + r * 0.12, cy + r * 0.28)])
+    elif t == "winter":                                        # a lump of coal
+        pts = [(cx + math.cos(a) * r * (0.8 + 0.2 * math.sin(a * 3)), cy + math.sin(a) * r * (0.75 + 0.2 * math.cos(a * 2)))
+               for a in [i / 9 * 2 * math.pi for i in range(9)]]
+        pygame.draw.polygon(surf, (30, 30, 34), pts)
+        pygame.draw.circle(surf, (80, 80, 90), (cx - r * 0.3, cy - r * 0.3), r * 0.15)
+    elif t == "valentines":                                    # a broken heart
+        draw_heart(surf, cx, cy, r * 0.9, (90, 20, 40))
+        pygame.draw.lines(surf, (20, 10, 15), False, [(cx, cy - r * 0.5), (cx - r * 0.18, cy - r * 0.1),
+                                                     (cx + r * 0.15, cy + r * 0.2), (cx, cy + r * 0.8)], 3)
+    elif t == "easter":                                        # a rotten egg
+        pygame.draw.ellipse(surf, (120, 150, 60), (cx - r * 0.7, cy - r * 0.9, r * 1.4, r * 1.8))
+        pygame.draw.lines(surf, (50, 60, 20), False, [(cx - r * 0.6, cy), (cx - r * 0.2, cy - r * 0.2),
+                                                     (cx + r * 0.1, cy + r * 0.1), (cx + r * 0.6, cy - r * 0.1)], 3)
+        for dx in (-0.4, 0.3):
+            pygame.draw.line(surf, (150, 190, 80), (cx + dx * r, cy - r * 1.1), (cx + dx * r + 4, cy - r * 1.5), 2)
+    else:                                                      # a spiky sea urchin
+        for i in range(16):
+            a = i / 16 * 2 * math.pi
+            pygame.draw.line(surf, (60, 20, 70), (cx, cy), (cx + math.cos(a) * r * 1.15, cy + math.sin(a) * r * 1.15), 3)
+        pygame.draw.circle(surf, (90, 30, 100), (cx, cy), r * 0.65)
+    return True
+
+
+def theme_gem(size):
+    """The mines game's gem, as the season's emblem (None with no theme)."""
+    t = CURRENT_THEME
+    if not t:
+        return None
+
+    def make():
+        s = pygame.Surface((size[0] * 2, size[1] * 2), pygame.SRCALPHA)
+        theme_icon(s, t, size[0], size[1], min(size) * 0.9)
+        return pygame.transform.smoothscale(s, size)
+    return themed(("gem", size), make)
+
+
+# ---- the chicken's costume ------------------------------------------------------------------
+def draw_chicken_costume(surf, x, y, k, top):
+    t = CURRENT_THEME
+    if t == "halloween":                                       # witch hat
+        pygame.draw.ellipse(surf, (25, 15, 35), (x - 20 * k, top - 6 * k, 40 * k, 9 * k))
+        pygame.draw.polygon(surf, (25, 15, 35), [(x - 11 * k, top - 3 * k), (x + 11 * k, top - 3 * k), (x + 6 * k, top - 30 * k)])
+        pygame.draw.rect(surf, (140, 60, 200), (x - 10 * k, top - 8 * k, 20 * k, 4 * k))
+    elif t == "winter":                                        # beanie and scarf
+        pygame.draw.circle(surf, (200, 30, 40), (x, top - 1 * k), 13 * k, draw_top_left=True, draw_top_right=True)
+        pygame.draw.rect(surf, (245, 245, 250), (x - 14 * k, top - 2 * k, 28 * k, 5 * k), border_radius=int(2 * k))
+        pygame.draw.circle(surf, (245, 245, 250), (x, top - 15 * k), 4 * k)
+        pygame.draw.rect(surf, (40, 120, 60), (x - 19 * k, y + 5 * k, 38 * k, 6 * k), border_radius=int(3 * k))
+        pygame.draw.rect(surf, (40, 120, 60), (x + 8 * k, y + 7 * k, 6 * k, 14 * k), border_radius=int(2 * k))
+    elif t == "valentines":                                    # blushing, with a heart
+        for ex in (-12, 12):
+            pygame.draw.circle(surf, (255, 150, 180), (x + ex * k, y + 1 * k), 4 * k)
+        draw_heart(surf, x, top - 12 * k, 7 * k, (230, 40, 80))
+    elif t == "easter":                                        # bunny ears
+        for ex in (-7, 7):
+            pygame.draw.ellipse(surf, (250, 250, 250), (x + ex * k - 5 * k, top - 26 * k, 10 * k, 28 * k))
+            pygame.draw.ellipse(surf, (255, 180, 205), (x + ex * k - 2.5 * k, top - 22 * k, 5 * k, 20 * k))
+    elif t == "summer":                                        # sunglasses
+        for ex in (-8, 8):
+            pygame.draw.rect(surf, (20, 20, 30), (x + ex * k - 6 * k, y - 10 * k, 12 * k, 8 * k), border_radius=int(3 * k))
+        pygame.draw.line(surf, (20, 20, 30), (x - 2 * k, y - 7 * k), (x + 2 * k, y - 7 * k), max(1, int(2 * k)))
 
 
 # --------------------------------------------------------------------------
