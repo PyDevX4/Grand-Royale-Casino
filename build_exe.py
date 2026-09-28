@@ -184,7 +184,7 @@ def main():
             bump_version("patch")
 
     write_icon()
-    # Each version builds into its own folder (release1.2.3), so a copy of the game you're still playing can
+    # Each version builds into its own folder (release/v1.2.3), so a copy of the game you're still playing can
     # never block the next build
     dist = os.path.join("release", "v" + VERSION)
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed", "--distpath", dist,
