@@ -11,6 +11,7 @@ import math
 import os
 import random
 import sys
+import threading
 import time
 from array import array
 from collections import deque
@@ -13190,6 +13191,10 @@ class Settings:
         self.btn_full = Button((450, 330, 260, 56), "", (40, 90, 160), 20, "F11")
         self.btn_delete = Button((170, 520, 420, 64), "DELETE ALL DATA", (150, 35, 40), 22,
                                  f"RESTART WITH {money(START_BALANCE)}")
+        self.btn_logout = Button((690, 180, 180, 56), "LOG OUT", (150, 35, 40), 20)
+        self.btn_del_acct = Button((880, 180, 230, 56), "DELETE ACCOUNT", (110, 25, 30), 18)
+        self.btn_login = Button((900, 180, 210, 56), "LOG IN", (40, 90, 160), 20, "OR CREATE ACCOUNT")
+        self.del_confirm_t = 0.0
 
     def can_leave(self):
         return True
@@ -13203,6 +13208,25 @@ class Settings:
 
     def on_enter(self):
         self.name = self.app.player_name
+
+    def account_click(self, pos):
+        app = self.app
+        if app.session:
+            if self.btn_logout.clicked(pos):
+                app.log_out()
+                return True
+            if self.btn_del_acct.clicked(pos, not app.account_flow):
+                if self.del_confirm_t > 0:
+                    app.start_account_flow("delete", flow_delete(app.session))
+                    self.del_confirm_t = 0.0
+                else:
+                    self.del_confirm_t = 5.0
+                    app.sfx("lose")
+                return True
+        elif self.btn_login.clicked(pos):
+            app.scene = "account"
+            return True
+        return False
 
     def save_name(self):
         name = clean_name(self.name)
@@ -13230,8 +13254,12 @@ class Settings:
             elif e.unicode and (e.unicode.isalnum() or e.unicode in " _-.") and len(self.name) < NAME_MAX:
                 self.name += e.unicode
         elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-            self.editing = self.name_box.collidepoint(e.pos)
-            if self.btn_save_name.clicked(e.pos):
+            if self.account_click(e.pos):
+                return
+            self.editing = self.name_box.collidepoint(e.pos) and not self.app.session
+            if self.app.session:
+                pass
+            elif self.btn_save_name.clicked(e.pos):
                 self.save_name()
             elif self.btn_sound.clicked(e.pos):
                 self.app.sound_on = not self.app.sound_on
@@ -13249,16 +13277,41 @@ class Settings:
     def update(self, dt):
         self.t += dt
         self.confirm_t = max(0.0, self.confirm_t - dt)
+        self.del_confirm_t = max(0.0, self.del_confirm_t - dt)
 
     def draw(self, surf):
         mouse = pygame.mouse.get_pos()
         surf.blit(self.bg, (0, 0))
         panel = pygame.Rect(120, 80, 1040, 540)
         soft_panel(surf, panel, 160, (110, 100, 170))
+        if self.app.session:                          # logged in: the account
+            app = self.app
+            draw_text(surf, "ACCOUNT", font(18, bold=True), GOLD, (170, 130), anchor="midleft")
+            draw_text(surf, "Your progress is saved online. Log in with this username anywhere.", font(14),
+                      (190, 190, 210), (170, 156), anchor="midleft")
+            r = self.name_box.copy()
+            r.w = 500
+            pygame.draw.rect(surf, (6, 6, 14), r, border_radius=10)
+            pygame.draw.rect(surf, (100, 95, 140), r, width=2, border_radius=10)
+            draw_text(surf, app.session.name, font(24, bold=True), WHITE, (r.x + 16, r.centery), anchor="midleft")
+            state = {"saving": "saving...", "offline": "offline", "saved": "saved"}.get(app.cloud_state, "online")
+            draw_text(surf, state, font(13, bold=True), (140, 220, 160), (r.right - 14, r.centery), anchor="midright")
+            self.btn_logout.draw(surf, mouse)
+            if self.del_confirm_t > 0:
+                self.btn_del_acct.text, self.btn_del_acct.hint = f"SURE? CLICK ({math.ceil(self.del_confirm_t)})", None
+            else:
+                self.btn_del_acct.text, self.btn_del_acct.hint = "DELETE ACCOUNT", None
+            if app.account_flow and app.account_flow[0] == "delete":
+                self.btn_del_acct.text = "DELETING..."
+            self.btn_del_acct.draw(surf, mouse, not app.account_flow)
+            if app.account_error:
+                draw_text(surf, app.account_error, font(13, bold=True), (240, 130, 130), (170, 252), anchor="midleft")
+            self.draw_rest(surf, mouse)
+            return
         # name
         draw_text(surf, "USERNAME", font(18, bold=True), GOLD, (170, 130), anchor="midleft")
-        draw_text(surf, "This is the name other players see in multiplayer.", font(14), (190, 190, 210), (170, 156),
-                  anchor="midleft")
+        draw_text(surf, "Playing as a guest - this name is only for multiplayer. Log in to save online.", font(14),
+                  (190, 190, 210), (170, 156), anchor="midleft")
         pygame.draw.rect(surf, (6, 6, 14), self.name_box, border_radius=10)
         pygame.draw.rect(surf, GOLD if self.editing else (100, 95, 140), self.name_box, width=2, border_radius=10)
         shown = self.name + ("|" if self.editing and int(self.t * 2) % 2 == 0 else "")
@@ -13269,6 +13322,10 @@ class Settings:
             draw_text(surf, "click to type a name", font(18), (110, 110, 140), (self.name_box.x + 16,
                                                                                self.name_box.centery), anchor="midleft")
         self.btn_save_name.draw(surf, mouse, clean_name(self.name) != self.app.player_name)
+        self.btn_login.draw(surf, mouse)
+        self.draw_rest(surf, mouse)
+
+    def draw_rest(self, surf, mouse):
         # options
         draw_text(surf, "OPTIONS", font(18, bold=True), GOLD, (170, 300), anchor="midleft")
         self.btn_sound.text = f"SOUND: {'ON' if self.app.sound_on else 'OFF'}"
@@ -13279,9 +13336,13 @@ class Settings:
         # delete
         pygame.draw.line(surf, (90, 60, 70), (170, 440), (1110, 440), 1)
         draw_text(surf, "DELETE DATA", font(18, bold=True), (240, 110, 110), (170, 470), anchor="midleft")
-        draw_text(surf, f"Wipes everything and starts the game over with {money(START_BALANCE)}: chips, stocks, "
-                        "stats, trophies, lottery tickets, daily streak and your name.", font(14), (200, 190, 200),
-                  (170, 495), anchor="midleft")
+        if self.app.session:
+            what = (f"Wipes all progress on your account and starts over with {money(START_BALANCE)}: chips, stocks, "
+                    "stats, trophies, lottery tickets and daily streak. Your account stays.")
+        else:
+            what = (f"Wipes everything and starts the game over with {money(START_BALANCE)}: chips, stocks, "
+                    "stats, trophies, lottery tickets, daily streak and your name.")
+        draw_text(surf, what, font(14), (200, 190, 200), (170, 495), anchor="midleft")
         if self.confirm_t > 0:
             self.btn_delete.text = f"CLICK AGAIN TO DELETE ({math.ceil(self.confirm_t)})"
             self.btn_delete.hint = "THIS CAN'T BE UNDONE"
@@ -13434,7 +13495,8 @@ class Title:
 
     def gamble(self):
         self.app.sfx("chip")
-        self.app.scene = "menu"
+        app = self.app
+        app.scene = "menu" if (app.session or app.guest) and not app.account_flow else "account"
 
     # ---- animation -------------------------------------------------------------
     def cue(self, name, at, sound):
@@ -13674,7 +13736,9 @@ class Title:
             if not WEB:
                 self.btn_quit.draw(canvas, mouse, self.done())
             info_a = int(255 * btn_k)
-            img = font(16, bold=True).render(f"YOUR CHIPS: {money(self.app.balance)}", True, GOLD)
+            who = (f"{self.app.session.name.upper()}'S CHIPS" if self.app.session else
+                   "LOGGING IN..." if self.app.account_flow else "YOUR CHIPS")
+            img = font(16, bold=True).render(f"{who}: {money(self.app.balance)}", True, GOLD)
             img.set_alpha(info_a)
             canvas.blit(img, img.get_rect(center=(W / 2, 630)))
             img = font(12).render("Play money only - chips have no cash value and can't be exchanged for real money.",
@@ -14393,6 +14457,497 @@ def art_coinflip(w, h):
     draw_text(s, "x2", font(h * k * 0.3, bold=True, serif=True), (255, 225, 120), (w * k * 0.78, h * k * 0.68),
               shadow=(0, 0, 0))
     return pygame.transform.smoothscale(s, (w, h))
+
+
+# --------------------------------------------------------------------------
+# Online accounts (Supabase) - the same Supabase project as Cube Shooter, with its own table
+# --------------------------------------------------------------------------
+SUPABASE_URL = "https://ahjhfwucsivhzhqcjyau.supabase.co"
+SUPABASE_KEY = "sb_publishable_MUfA7Qcl32e-XmzP9mYYGg_7AKqOzBf"   # the publishable key: it's meant to ship in apps
+ACCOUNT_DOMAIN = "players.grandroyale.game"   # each username gets a stand-in email nobody ever sees
+ACCOUNT_TABLE = "casino_players"              # see supabase_casino_setup.sql
+NAME_MIN, PASS_MIN = 3, 4
+CLOUD_SAVE_EVERY = 20.0                       # seconds between uploads of your progress
+REMEMBER_KEY = "grand_royale_remember"
+HTTP_TIMEOUT = 10.0
+
+
+class AccountError(Exception):
+    pass
+
+
+def account_email(name):
+    return f"{name.strip().lower()}@{ACCOUNT_DOMAIN}"
+
+
+def account_password(password):
+    return "grand-royale:" + password          # Supabase wants 6+ characters; the game allows 4
+
+
+def username_problem(name):
+    name = name.strip()
+    if len(name) < NAME_MIN:
+        return f"USERNAMES NEED AT LEAST {NAME_MIN} CHARACTERS"
+    if len(name) > NAME_MAX:
+        return f"USERNAMES CAN BE AT MOST {NAME_MAX} CHARACTERS"
+    if not all(ch.isascii() and (ch.isalnum() or ch in "_-") for ch in name):
+        return "USE ONLY LETTERS, NUMBERS, _ AND -"
+    return ""
+
+
+class HttpReq:
+    """One request to Supabase that never freezes the game. On the PC it runs on a thread; in the browser
+    it uses the page's own fetch(). Check .poll() each frame until it says it's done."""
+    _next = 0
+
+    def __init__(self, method, path, body=None, token=None, prefer=None):
+        self.done = False
+        self.status = 0             # 0 means the server couldn't be reached
+        self.data = None
+        self.text = ""
+        headers = {"apikey": SUPABASE_KEY, "Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        if prefer:
+            headers["Prefer"] = prefer
+        url = SUPABASE_URL + path
+        body_text = json.dumps(body) if body is not None else None
+        if WEB:
+            self.start_web(method, url, headers, body_text)
+        else:
+            threading.Thread(target=self.run, args=(method, url, headers, body_text), daemon=True).start()
+
+    def run(self, method, url, headers, body_text):
+        import urllib.error
+        import urllib.request
+        status, text = 0, ""
+        try:
+            req = urllib.request.Request(url, data=body_text.encode() if body_text is not None else None,
+                                         headers=headers, method=method)
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                status, text = resp.status, resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as err:
+            status = err.code
+            try:
+                text = err.read().decode("utf-8", "replace")
+            except Exception:
+                text = ""
+        except Exception as err:
+            status, text = 0, str(err)
+        self.finish(status, text)
+
+    def start_web(self, method, url, headers, body_text):
+        import platform
+        HttpReq._next += 1
+        self.rid = HttpReq._next
+        body = json.dumps(body_text) if body_text is not None else "undefined"
+        platform.window.eval(
+            "(function(){window.__gr=window.__gr||{};const id=%d;"
+            "fetch(%s,{method:%s,headers:%s,body:%s})"
+            ".then(r=>r.text().then(t=>{window.__gr[id]=JSON.stringify({s:r.status,t:t});}))"
+            ".catch(e=>{window.__gr[id]=JSON.stringify({s:0,t:String(e)});});})()"
+            % (self.rid, json.dumps(url), json.dumps(method), json.dumps(headers), body))
+
+    def poll(self):
+        if WEB and not self.done:
+            import platform
+            got = platform.window.eval("(window.__gr&&window.__gr[%d])||''" % self.rid)
+            got = str(got) if got else ""
+            if got:
+                platform.window.eval("delete window.__gr[%d]" % self.rid)
+                info = json.loads(got)
+                self.finish(int(info.get("s", 0)), str(info.get("t", "")))
+        return self.done
+
+    def finish(self, status, text):
+        self.text = text
+        try:
+            self.data = json.loads(text) if text else None
+        except ValueError:
+            self.data = None
+        self.status = status
+        self.done = True
+
+    @property
+    def ok(self):
+        return 200 <= self.status < 300
+
+    def message(self):
+        d = self.data if isinstance(self.data, dict) else {}
+        return str(d.get("msg") or d.get("message") or d.get("error_description") or d.get("error") or self.text)[:200]
+
+
+def need(r, what):
+    """Turn a failed request into a message a player can understand."""
+    if r.ok:
+        return
+    if r.status == 0:
+        raise AccountError("CAN'T REACH THE SERVER - CHECK YOUR INTERNET")
+    msg = r.message()
+    if r.status == 404 or "does not exist" in msg or "schema cache" in msg:
+        raise AccountError("THE CASINO'S ACCOUNT DATABASE ISN'T SET UP YET")
+    raise AccountError(f"{what} FAILED ({r.status}): {msg[:70]}")
+
+
+class Session:
+    """A logged-in player."""
+
+    def __init__(self, auth, name=""):
+        self.user_id = auth["user"]["id"]
+        self.email_name = str(auth["user"].get("email", "player@")).split("@")[0]
+        self.name = name
+        self.update(auth)
+
+    def update(self, auth):
+        self.access = auth["access_token"]
+        self.refresh = auth["refresh_token"]
+        self.expires_at = time.time() + int(auth.get("expires_in", 3600)) - 120
+
+
+class Flow:
+    """Runs a login / save / ... step by step. The step function is a generator that yields each HttpReq and
+    gets it back once it's finished, so nothing ever waits on the internet."""
+
+    def __init__(self, gen):
+        self.gen = gen
+        self.req = None
+        self.done = False
+        self.result = None
+        self.error = ""
+        self.step(None)
+
+    def step(self, value):
+        try:
+            self.req = self.gen.send(value)
+        except StopIteration as stop:
+            self.done, self.result = True, stop.value
+        except AccountError as err:
+            self.done, self.error = True, str(err)
+        except Exception as err:                     # a surprise reply from the server
+            self.done, self.error = True, f"SOMETHING WENT WRONG: {str(err)[:60]}"
+
+    def poll(self):
+        if not self.done and self.req.poll():
+            self.step(self.req)
+        return self.done
+
+    def wait(self, timeout):
+        """Block until done (only used on the PC when the game is closing)."""
+        end = time.time() + timeout
+        while not self.poll() and time.time() < end:
+            time.sleep(0.05)
+        return self.done and not self.error
+
+
+def flow_refresh(session):
+    if time.time() >= session.expires_at:
+        r = yield HttpReq("POST", "/auth/v1/token?grant_type=refresh_token", {"refresh_token": session.refresh})
+        need(r, "STAYING LOGGED IN")
+        session.update(r.data)
+
+
+def flow_open(session, typed_name, new_progress):
+    """Load the player's row - or create it if it's missing."""
+    r = yield HttpReq("GET", f"/rest/v1/{ACCOUNT_TABLE}?id=eq.{session.user_id}&select=username,progress",
+                      token=session.access)
+    need(r, "LOADING YOUR ACCOUNT")
+    rows = r.data if isinstance(r.data, list) else []
+    if rows:
+        session.name = rows[0]["username"]
+        return rows[0].get("progress") or {}
+    name = typed_name or session.email_name
+    r = yield HttpReq("POST", f"/rest/v1/{ACCOUNT_TABLE}", {"id": session.user_id, "username": name,
+                                                            "progress": new_progress},
+                      token=session.access, prefer="return=minimal")
+    need(r, "CREATING YOUR ACCOUNT")
+    session.name = name
+    return new_progress
+
+
+def flow_login(name, password):
+    r = yield HttpReq("POST", "/auth/v1/token?grant_type=password",
+                      {"email": account_email(name), "password": account_password(password)})
+    if r.status in (400, 401):
+        raise AccountError("WRONG USERNAME OR PASSWORD")
+    need(r, "LOGGING IN")
+    session = Session(r.data)
+    progress = yield from flow_open(session, name.strip(), {})
+    return session, progress
+
+
+def flow_signup(name, password, progress):
+    name = name.strip()
+    r = yield HttpReq("POST", "/rest/v1/rpc/casino_username_taken", {"name": name})
+    need(r, "CHECKING THE USERNAME")
+    if r.data is True:
+        raise AccountError("THAT USERNAME IS TAKEN")
+    r = yield HttpReq("POST", "/auth/v1/signup", {"email": account_email(name), "password": account_password(password)})
+    if not r.ok and ("already" in r.message().lower() or r.status == 422):
+        raise AccountError("THAT USERNAME IS TAKEN")
+    need(r, "CREATING YOUR ACCOUNT")
+    if not isinstance(r.data, dict) or not r.data.get("access_token"):
+        raise AccountError("THE SERVER DIDN'T LOG THE NEW ACCOUNT IN")
+    session = Session(r.data, name)
+    progress = yield from flow_open(session, name, progress)
+    return session, progress
+
+
+def flow_resume(refresh_token):
+    r = yield HttpReq("POST", "/auth/v1/token?grant_type=refresh_token", {"refresh_token": refresh_token})
+    if r.status in (400, 401):
+        raise AccountError("PLEASE LOG IN AGAIN")
+    need(r, "LOGGING IN")
+    session = Session(r.data)
+    progress = yield from flow_open(session, "", {})
+    return session, progress
+
+
+def flow_save(session, progress):
+    yield from flow_refresh(session)
+    r = yield HttpReq("PATCH", f"/rest/v1/{ACCOUNT_TABLE}?id=eq.{session.user_id}",
+                      {"progress": progress, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+                      token=session.access, prefer="return=minimal")
+    need(r, "SAVING")
+    return True
+
+
+def flow_delete(session):
+    yield from flow_refresh(session)
+    r = yield HttpReq("POST", "/rest/v1/rpc/delete_my_account", {}, token=session.access)
+    need(r, "DELETING THE ACCOUNT")
+    return True
+
+
+def remember_path():
+    return os.environ.get("GRAND_ROYALE_REMEMBER") or os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "GrandRoyale", "remember.json")
+
+
+def remember_load():
+    try:
+        if WEB:
+            import platform
+            got = platform.window.localStorage.getItem(REMEMBER_KEY)
+            return str(got) if got else ""
+        with open(remember_path(), encoding="utf-8") as f:
+            return str(json.load(f).get("refresh", ""))
+    except Exception:
+        return ""
+
+
+def remember_save(token):
+    try:
+        if WEB:
+            import platform
+            platform.window.localStorage.setItem(REMEMBER_KEY, token)
+            return
+        os.makedirs(os.path.dirname(remember_path()), exist_ok=True)
+        with open(remember_path(), "w", encoding="utf-8") as f:
+            json.dump({"refresh": token}, f)
+    except Exception:
+        pass
+
+
+def remember_clear():
+    try:
+        if WEB:
+            import platform
+            platform.window.localStorage.removeItem(REMEMBER_KEY)
+        elif os.path.exists(remember_path()):
+            os.remove(remember_path())
+    except Exception:
+        pass
+
+
+# ---- the log in / sign up screen ------------------------------------------------
+class AccountScreen:
+    key = "account"
+
+    def __init__(self, app):
+        self.app = app
+        self.bg = gradient_bg((40, 10, 20), (6, 3, 8))
+        self.mode = "login"             # login or signup
+        self.name = ""
+        self.pw = ""
+        self.pw2 = ""
+        self.focus = "name"
+        self.remember = True
+        self.bring = True               # sign up: start the account with the progress on this computer
+        self.error = ""
+        self.t = 0.0
+        self.boxes = {"name": pygame.Rect(W / 2 - 230, 250, 460, 52), "pw": pygame.Rect(W / 2 - 230, 336, 460, 52),
+                      "pw2": pygame.Rect(W / 2 - 230, 422, 460, 52)}
+        self.tabs = [pygame.Rect(W / 2 - 230, 150, 226, 46), pygame.Rect(W / 2 + 4, 150, 226, 46)]
+        self.btn_go = Button((W / 2 - 230, 560, 460, 62), "LOG IN", (25, 120, 60), 26, "ENTER")
+        self.btn_guest = Button((W / 2 - 150, 636, 300, 44), "PLAY AS GUEST", (70, 70, 85), 17, "SAVED ON THIS DEVICE ONLY")
+        self.btn_logout = Button((W / 2 - 150, 430, 300, 58), "LOG OUT", (150, 35, 40), 22)
+        self.btn_continue = Button((W / 2 - 150, 340, 300, 64), "PLAY", (25, 120, 60), 26, "ENTER")
+        self.check_remember = pygame.Rect(0, 0, 26, 26)
+        self.check_bring = pygame.Rect(0, 0, 26, 26)
+
+    def can_leave(self):
+        return not self.working()
+
+    def outstanding_bets(self):
+        return 0
+
+    def leave(self):
+        self.app.guest = self.app.guest or not self.app.session
+
+    def on_enter(self):
+        self.error = ""
+        self.pw = self.pw2 = ""
+
+    def working(self):
+        return bool(self.app.account_flow)
+
+    def fields(self):
+        return ["name", "pw", "pw2"] if self.mode == "signup" else ["name", "pw"]
+
+    def submit(self):
+        if self.working():
+            return
+        problem = username_problem(self.name)
+        if problem:
+            self.error = problem
+            return
+        if len(self.pw) < PASS_MIN:
+            self.error = f"PASSWORDS NEED AT LEAST {PASS_MIN} CHARACTERS"
+            return
+        self.app.remember = self.remember
+        if self.mode == "signup":
+            if self.pw != self.pw2:
+                self.error = "THE TWO PASSWORDS DON'T MATCH"
+                return
+            progress = self.app.save_data(cloud=True) if self.bring else {}
+            self.app.start_account_flow("signup", flow_signup(self.name, self.pw, progress))
+        else:
+            self.app.start_account_flow("login", flow_login(self.name, self.pw))
+        self.error = ""
+
+    def handle(self, e):
+        app = self.app
+        if app.session:                                  # already logged in
+            if e.type == pygame.KEYDOWN and e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                app.scene = "menu"
+            elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                if self.btn_continue.clicked(e.pos):
+                    app.scene = "menu"
+                elif self.btn_logout.clicked(e.pos):
+                    app.log_out()
+            return
+        if self.working():
+            return
+        if e.type == pygame.KEYDOWN:
+            if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                self.submit()
+            elif e.key == pygame.K_TAB:
+                f = self.fields()
+                self.focus = f[(f.index(self.focus) + 1) % len(f)] if self.focus in f else f[0]
+            elif e.key == pygame.K_BACKSPACE:
+                setattr(self, self.focus, getattr(self, self.focus)[:-1])
+            elif e.unicode and e.unicode.isprintable():
+                cur = getattr(self, self.focus)
+                if self.focus == "name":
+                    if (e.unicode.isalnum() or e.unicode in "_-") and e.unicode.isascii() and len(cur) < NAME_MAX:
+                        self.name = cur + e.unicode
+                elif len(cur) < 64:
+                    setattr(self, self.focus, cur + e.unicode)
+        elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            for i, r in enumerate(self.tabs):
+                if r.collidepoint(e.pos):
+                    self.mode = ("login", "signup")[i]
+                    self.error = app.account_error = ""
+                    if self.focus not in self.fields():
+                        self.focus = "pw"
+                    return
+            for key in self.fields():
+                if self.boxes[key].collidepoint(e.pos):
+                    self.focus = key
+                    return
+            if self.check_remember.inflate(260, 10).collidepoint(e.pos) and self.check_remember.x < e.pos[0]:
+                self.remember = not self.remember
+            elif self.mode == "signup" and self.check_bring.inflate(420, 10).collidepoint(e.pos) and \
+                    self.check_bring.x < e.pos[0]:
+                self.bring = not self.bring
+            elif self.btn_go.clicked(e.pos):
+                self.submit()
+            elif self.btn_guest.clicked(e.pos):
+                app.guest = True
+                app.scene = "menu"
+
+    def update(self, dt):
+        self.t += dt
+
+    def box(self, surf, key, label, secret):
+        r = self.boxes[key]
+        on = self.focus == key and not self.working()
+        draw_text(surf, label, font(14, bold=True), (220, 200, 210), (r.x, r.y - 14), anchor="midleft")
+        pygame.draw.rect(surf, (8, 6, 12), r, border_radius=10)
+        pygame.draw.rect(surf, GOLD if on else (110, 90, 110), r, width=2, border_radius=10)
+        value = getattr(self, key)
+        shown = "*" * len(value) if secret else value
+        if on and int(self.t * 2) % 2 == 0:
+            shown += "|"
+        draw_text(surf, shown, font(24, bold=True), WHITE, (r.x + 16, r.centery), anchor="midleft")
+
+    def checkbox(self, surf, rect, on, label):
+        pygame.draw.rect(surf, (8, 6, 12), rect, border_radius=6)
+        pygame.draw.rect(surf, GOLD, rect, width=2, border_radius=6)
+        if on:
+            pygame.draw.lines(surf, GOLD, False, [(rect.x + 5, rect.centery), (rect.x + 11, rect.bottom - 6),
+                                                  (rect.right - 5, rect.y + 5)], 3)
+        draw_text(surf, label, font(15, bold=True), (220, 210, 220), (rect.right + 10, rect.centery), anchor="midleft")
+
+    def draw(self, surf):
+        mouse = pygame.mouse.get_pos()
+        surf.blit(self.bg, (0, 0))
+        app = self.app
+        panel = pygame.Rect(W / 2 - 280, 76, 560, 620)
+        soft_panel(surf, panel, 170, GOLD_DARK)
+        draw_text(surf, "YOUR ACCOUNT", font(30, bold=True, serif=True), GOLD, (W / 2, 112))
+        if app.session:
+            draw_text(surf, "LOGGED IN AS", font(16, bold=True), (200, 190, 200), (W / 2, 200))
+            draw_text(surf, app.session.name, font(40, bold=True), WHITE, (W / 2, 246))
+            draw_text(surf, "Your chips and progress are saved online.", font(15), (190, 190, 200), (W / 2, 292))
+            self.btn_continue.draw(surf, mouse)
+            self.btn_logout.draw(surf, mouse)
+            draw_text(surf, "Log in with this username on any computer - or in the web version.", font(14),
+                      (170, 170, 185), (W / 2, 530))
+            app.draw_top_bar(surf, "ACCOUNT", lobby=True, show_help=False)
+            return
+        for i, (r, label) in enumerate(zip(self.tabs, ["LOG IN", "CREATE ACCOUNT"])):
+            on = ("login", "signup")[i] == self.mode
+            pygame.draw.rect(surf, (90, 70, 20) if on else (30, 24, 34), r, border_radius=10)
+            pygame.draw.rect(surf, GOLD if on else (90, 80, 100), r, width=2, border_radius=10)
+            draw_text(surf, label, font(17, bold=True), WHITE if on else (170, 160, 175), r.center)
+        self.box(surf, "name", "USERNAME", False)
+        self.box(surf, "pw", "PASSWORD", True)
+        y = 486
+        if self.mode == "signup":
+            self.box(surf, "pw2", "TYPE THE PASSWORD AGAIN", True)
+            y = 494
+            self.check_bring.topleft = (W / 2 - 230, 510)
+            self.checkbox(surf, self.check_bring, self.bring, "Start with my chips & trophies from this device")
+            self.check_remember.topleft = (W / 2 - 230, 480)
+            self.btn_go.rect.y = 552
+        else:
+            self.check_remember.topleft = (W / 2 - 230, y - 80)
+            self.btn_go.rect.y = 470
+        self.checkbox(surf, self.check_remember, self.remember, "Keep me logged in on this device")
+        self.btn_go.text = "LOG IN" if self.mode == "login" else "CREATE ACCOUNT"
+        if self.working():
+            self.btn_go.text = "PLEASE WAIT" + "." * (int(self.t * 3) % 4)
+        self.btn_go.draw(surf, mouse, not self.working())
+        self.btn_guest.rect.y = self.btn_go.rect.bottom + (18 if self.mode == "login" else 10)
+        self.btn_guest.draw(surf, mouse, not self.working())
+        if self.error or app.account_error:
+            draw_pill(surf, self.error or app.account_error, font(15, bold=True), (W / 2, 704),
+                      (255, 200, 200), (60, 10, 10, 230), (200, 80, 80), pad=(14, 4))
+        elif self.mode == "login":
+            draw_text(surf, "New here? Press CREATE ACCOUNT.", font(14), (170, 170, 185),
+                      (W / 2, self.btn_guest.rect.bottom + 24))
+        app.draw_top_bar(surf, "ACCOUNT", lobby=True, show_help=False)
 
 
 # --------------------------------------------------------------------------
@@ -16247,7 +16802,8 @@ class App:
                        "crossy": Crossy(self), "yesno": self.yesno, "cups": Cups(self),
                        "netpoker": NetPoker(self), "netbj": NetBlackjack(self), "online": Online(self),
                        "settings": Settings(self), "title": Title(self),
-                       "pusher": Pusher(self, self.saved.get("pusher")), "coinflip": CoinFlip(self)}
+                       "pusher": Pusher(self, self.saved.get("pusher")), "coinflip": CoinFlip(self),
+                       "account": AccountScreen(self)}
         self.games = list(self.scenes.values())
         self.profile = ProfileOverlay(self)
         self.scene = "title"            # the game opens on the main menu
@@ -16256,6 +16812,23 @@ class App:
         self.help = HelpOverlay()
         self.help_seen = set(self.saved.get("help_seen", []))
         self.last_scene = "menu"
+        if not hasattr(self, "session"):            # first start (not a profile switch): accounts
+            self.session = None           # the logged-in account, or None for a guest
+            self.guest = False            # chose "play as guest" this time
+            self.remember = False
+            self.account_flow = None      # (what, Flow) while logging in / signing up / deleting
+            self.account_error = ""
+            self.cloud_flow = None        # an upload of your progress that's under way
+            self.cloud_data = None
+            self.cloud_dirty = False
+            self.cloud_wait = 0.0
+            self.cloud_state = ""
+            self.cloud_retry_data = None
+            self.remembered = remember_load()
+            if self.remembered:           # "keep me logged in": log back in while the title plays
+                self.start_account_flow("resume", flow_resume(self.remembered))
+        if self.session:
+            self.player_name = self.session.name
 
     # ---- persistence -----------------------------------------------------
     @staticmethod
@@ -16264,6 +16837,12 @@ class App:
         return platform.window.localStorage
 
     def load(self):
+        if getattr(self, "profile_data", None) is not None:      # switching to an account's progress
+            self.saved, self.profile_data = self.profile_data, None
+            try:
+                return max(0, int(self.saved.get("balance", START_BALANCE)))
+            except (TypeError, ValueError):
+                return START_BALANCE
         try:
             if WEB:
                 text = self.web_storage().getItem(WEB_SAVE_KEY)
@@ -16275,9 +16854,37 @@ class App:
         except Exception:
             return START_BALANCE
 
+    def read_local_save(self):
+        """The guest save on this device."""
+        try:
+            if WEB:
+                text = self.web_storage().getItem(WEB_SAVE_KEY)
+                return json.loads(str(text)) if text else {}
+            with open(SAVE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
     def save(self):
         try:
-            self.write_save({"balance": self.balance, "market": self.market.to_state(),
+            data = self.save_data()
+            if getattr(self, "session", None):         # logged in: it goes online (see cloud_tick)
+                self.cloud_data = self.save_data(cloud=True)
+                self.cloud_dirty = True
+                return
+            self.write_save(data)
+        except Exception:
+            pass
+
+    def save_data(self, cloud=False):
+        data = self.save_dict()
+        if cloud:                                      # keep online saves small: less price history
+            for st in data.get("market", {}).get("stocks", {}).values():
+                st["hist"] = st["hist"][-300:]
+        return data
+
+    def save_dict(self):
+        return ({"balance": self.balance, "market": self.market.to_state(),
                            "help_seen": sorted(getattr(self, "help_seen", [])),
                            "stats": getattr(self, "stats", {}), "achievements": getattr(self, "achievements", {}),
                            "played": sorted(getattr(self, "played", [])), "daily": getattr(self, "daily", {}),
@@ -16286,8 +16893,6 @@ class App:
                            "sound": getattr(self, "sound_on", True),
                            "pusher": self.scenes["pusher"].to_state() if hasattr(self, "scenes") else
                            self.saved.get("pusher", {})})
-        except Exception:
-            pass
 
     def write_save(self, data):
         if WEB:
@@ -16304,8 +16909,108 @@ class App:
         if snd:
             snd.play()
 
+    # ---- accounts ----------------------------------------------------------------------
+    def start_account_flow(self, what, gen):
+        self.account_error = ""
+        self.account_flow = (what, Flow(gen))
+
+    def account_tick(self, dt):
+        if self.account_flow:
+            what, flow = self.account_flow
+            if flow.poll():
+                self.account_flow = None
+                if flow.error:
+                    if what == "resume":
+                        if "LOG IN AGAIN" in flow.error:
+                            remember_clear()
+                        self.account_error = "COULDN'T LOG YOU BACK IN: " + flow.error
+                    else:
+                        self.account_error = flow.error
+                elif what == "delete":
+                    self.effects.toast("ACCOUNT DELETED", "Your account and its progress are gone")
+                    self.log_out(upload=False)
+                else:
+                    session, progress = flow.result
+                    self.enter_account(session, progress, what)
+        # uploading progress
+        if self.cloud_flow:
+            if self.cloud_flow.poll():
+                if self.cloud_flow.error:                  # try again soon (newer progress wins if there is some)
+                    self.cloud_state = "offline"
+                    if self.cloud_data is None:
+                        self.cloud_data = self.cloud_retry_data
+                    self.cloud_dirty = True
+                    self.cloud_wait = 10.0
+                else:
+                    self.cloud_state = "saved"
+                if self.session and self.remember and self.session.refresh != self.remembered:
+                    self.remembered = self.session.refresh
+                    remember_save(self.remembered)
+                self.cloud_flow = None
+        elif self.session and self.cloud_dirty and self.cloud_wait <= 0:
+            self.cloud_retry_data = self.cloud_data
+            self.cloud_flow = Flow(flow_save(self.session, self.cloud_data))
+            self.cloud_data = None
+            self.cloud_dirty = False
+            self.cloud_state = "saving"
+            self.cloud_wait = CLOUD_SAVE_EVERY
+        self.cloud_wait -= dt
+
+    def enter_account(self, session, progress, how):
+        was_guest = not self.session
+        self.switch_profile(progress, session)
+        if self.remember or how == "resume":
+            self.remembered = session.refresh
+            remember_save(session.refresh)
+        if self.scene == "account":
+            self.scene = "menu"
+            self.last_scene = "menu"
+        word = {"signup": "ACCOUNT CREATED", "resume": "WELCOME BACK"}.get(how, "LOGGED IN")
+        self.effects.toast(word, f"Playing as {session.name} - your progress saves online")
+        if how == "signup" and was_guest:
+            self.save()                                # put the chosen starting progress online right away
+            self.cloud_wait = 0
+
+    def switch_profile(self, saved, session):
+        """Load a different player's progress (an account, or the guest save) without restarting the game."""
+        if self.net:
+            self.leave_game()
+        title, scene = self.scenes.get("title"), self.scene
+        self.session = session
+        self.profile_data = saved or {}
+        self.__init__()
+        if title:
+            self.scenes["title"] = title
+        self.scene = self.last_scene = scene if scene in ("title", "menu", "account", "settings") else "menu"
+        if session:
+            self.player_name = session.name
+
+    def log_out(self, upload=True):
+        if self.session and upload:
+            self.save()
+            data = self.cloud_data
+            if data:
+                flow = Flow(flow_save(self.session, data))
+                if not WEB:
+                    flow.wait(8)                       # make sure the last save gets up there
+                else:
+                    self.cloud_flow = flow             # it finishes in the background
+        remember_clear()
+        self.remembered = ""
+        self.remember = False
+        self.guest = True
+        self.cloud_data, self.cloud_dirty, self.cloud_state = None, False, ""
+        self.switch_profile(self.read_local_save(), None)
+        self.effects.toast("LOGGED OUT", "Playing as a guest on this device")
+
     def reset_everything(self):
         """DELETE ALL DATA: wipe the save and start over exactly like a brand-new game."""
+        if getattr(self, "session", None):             # logged in: reset the account's progress online
+            self.switch_profile({}, self.session)
+            self.save()
+            self.cloud_wait = 0
+            self.effects.toast("GAME RESET", f"All progress deleted - you're starting over with {money(START_BALANCE)}")
+            return
         if self.net:
             self.net.close()
         if self.net_server:
@@ -16618,6 +17323,14 @@ class App:
                 text, col = f"Installing update v{new}...", (140, 230, 150)
             elif up.state == "failed":
                 text = f"v{VERSION}  (update v{new} failed - it'll try again next time)"
+        if self.session:
+            state = {"saving": "saving...", "offline": "offline - will retry", "saved": "saved online"}.get(
+                self.cloud_state, "online")
+            text += f"   |   {self.session.name}: {state}"
+        elif self.account_flow and self.account_flow[0] == "resume":
+            text += "   |   logging in..."
+        else:
+            text += "   |   guest"
         draw_text(surf, text, font(12, bold=True), col, (12, 708), anchor="midleft")
 
     def can_all_in(self):
@@ -16723,6 +17436,8 @@ class App:
         for game in self.games:
             self.balance += game.outstanding_bets()
         self.save()
+        if self.session and self.cloud_data and not WEB:        # last upload before closing
+            Flow(flow_save(self.session, self.cloud_data)).wait(8)
         if self.net:
             self.net.close()
         if self.net_server:
@@ -16799,6 +17514,7 @@ class App:
                 self.current().handle(e)
 
             self.market.update(dt)
+            self.account_tick(dt)
             if self.net_server:
                 self.net_server.update(dt)
             if self.net and not self.net.update(dt):
