@@ -13713,6 +13713,8 @@ class Title:
             canvas.blit(b, (0, 0))
         self.draw_rays(canvas, min(1.0, max(0.0, (t - TITLE_SLAM) / 1.0)))
         self.draw_beams(canvas, bg_k)
+        if bg_k >= 1:
+            self.app.themefx.draw_backdrop(canvas)
         for f in self.floaters:
             self.draw_chip(canvas, f, int(f["a"] * bg_k))
         for c in self.rain:                               # the opening chip shower
@@ -14839,6 +14841,9 @@ class AccountScreen:
         self.btn_guest = Button((W / 2 - 150, 636, 300, 44), "PLAY AS GUEST", (70, 70, 85), 17, "SAVED ON THIS DEVICE ONLY")
         self.btn_logout = Button((W / 2 - 150, 430, 300, 58), "LOG OUT", (150, 35, 40), 22)
         self.btn_continue = Button((W / 2 - 150, 340, 300, 64), "PLAY", (25, 120, 60), 26, "ENTER")
+        self.btn_delete = Button((W / 2 - 150, 506, 300, 52), "DELETE ACCOUNT", (110, 25, 30), 18,
+                                 "CLICK TWICE TO CONFIRM")
+        self.del_confirm_t = 0.0
         self.check_remember = pygame.Rect(0, 0, 26, 26)
         self.check_bring = pygame.Rect(0, 0, 26, 26)
 
@@ -14892,6 +14897,13 @@ class AccountScreen:
                     app.scene = "menu"
                 elif self.btn_logout.clicked(e.pos):
                     app.log_out()
+                elif self.btn_delete.clicked(e.pos, not self.working()):
+                    if self.del_confirm_t > 0:
+                        app.start_account_flow("delete", flow_delete(app.session))
+                        self.del_confirm_t = 0.0
+                    else:
+                        self.del_confirm_t = 5.0
+                        app.sfx("lose")
             return
         if self.working():
             return
@@ -14935,6 +14947,7 @@ class AccountScreen:
 
     def update(self, dt):
         self.t += dt
+        self.del_confirm_t = max(0.0, self.del_confirm_t - dt)
 
     def box(self, surf, key, label, secret):
         r = self.boxes[key]
@@ -14969,8 +14982,19 @@ class AccountScreen:
             draw_text(surf, "Your chips and progress are saved online.", font(15), (190, 190, 200), (W / 2, 292))
             self.btn_continue.draw(surf, mouse)
             self.btn_logout.draw(surf, mouse)
+            if self.working():
+                self.btn_delete.text, self.btn_delete.hint = "DELETING...", None
+            elif self.del_confirm_t > 0:
+                self.btn_delete.text = f"SURE? CLICK AGAIN ({math.ceil(self.del_confirm_t)})"
+                self.btn_delete.hint = "THIS CAN'T BE UNDONE"
+            else:
+                self.btn_delete.text, self.btn_delete.hint = "DELETE ACCOUNT", "CLICK TWICE TO CONFIRM"
+            self.btn_delete.draw(surf, mouse, not self.working())
             draw_text(surf, "Log in with this username on any computer - or in the web version.", font(14),
-                      (170, 170, 185), (W / 2, 530))
+                      (170, 170, 185), (W / 2, 600))
+            if app.account_error:
+                draw_pill(surf, app.account_error, font(15, bold=True), (W / 2, 704), (255, 200, 200),
+                          (60, 10, 10, 230), (200, 80, 80), pad=(14, 4))
             app.draw_top_bar(surf, "ACCOUNT", lobby=True, show_help=False)
             return
         for i, (r, label) in enumerate(zip(self.tabs, ["LOG IN", "CREATE ACCOUNT"])):
@@ -15192,6 +15216,263 @@ class LiveEvents:
                       col, pad=(12, 3))
 
 
+# ---- seasonal decorations: a scene behind the lobby / main menu, corners in every game, and extra movers ----
+def _pine(s, x, base, h, snow):
+    for k in range(3):
+        w = h * (0.55 - k * 0.12)
+        top = base - h * (0.35 + k * 0.3)
+        pygame.draw.polygon(s, (20, 70, 45), [(x - w, top + h * 0.38), (x + w, top + h * 0.38), (x, top)])
+        if snow:
+            pygame.draw.polygon(s, (240, 248, 255), [(x - w * 0.45, top + h * 0.17), (x + w * 0.45, top + h * 0.17), (x, top)])
+    pygame.draw.rect(s, (70, 45, 30), (x - 5, base - h * 0.1, 10, h * 0.12))
+
+
+def _flower(s, x, y, r, col):
+    for i in range(5):
+        a = i / 5 * 2 * math.pi
+        pygame.draw.circle(s, col, (x + math.cos(a) * r, y + math.sin(a) * r), r * 0.75)
+    pygame.draw.circle(s, (255, 220, 80), (x, y), r * 0.6)
+
+
+def _web(s, cx, cy, size, flip):
+    col = (230, 230, 240, 150)
+    d = -1 if flip else 1
+    ends = []
+    for i in range(6):
+        a = math.radians(i * 18)
+        ends.append((cx + d * math.cos(a) * size, cy + math.sin(a) * size))
+        pygame.draw.line(s, col, (cx, cy), ends[-1], 1)
+    for ring in (0.3, 0.55, 0.8):
+        pts = [(cx + (ex - cx) * ring, cy + (ey - cy) * ring) for ex, ey in ends]
+        pygame.draw.lines(s, col, False, pts, 1)
+
+
+def make_backdrop(name):
+    """The scene behind the lobby and the main menu (it's drawn under the tiles and buttons)."""
+    s = pygame.Surface((W, H), pygame.SRCALPHA)
+    rng = random.Random(3)
+    if name == "halloween":
+        for i in range(12):                                   # moon glow
+            pygame.draw.circle(s, (255, 240, 200, 10), (1150, 108), 90 - i * 4)
+        pygame.draw.circle(s, (245, 235, 200), (1150, 108), 40)
+        for cx, cy, r in ((1138, 98, 7), (1162, 118, 9), (1150, 90, 4)):
+            pygame.draw.circle(s, (220, 210, 175), (cx, cy), r)
+        for x in (70, 1215):                                  # dead trees
+            pygame.draw.line(s, (40, 25, 45), (x, 720), (x, 470), 10)
+            for k in range(4):
+                y = 520 + k * 40
+                d = 1 if k % 2 else -1
+                pygame.draw.line(s, (40, 25, 45), (x, y), (x + d * 55, y - 45), 5)
+                pygame.draw.line(s, (40, 25, 45), (x + d * 35, y - 28), (x + d * 45, y - 60), 3)
+        pts = [(0, 720)] + [(x, 668 + 14 * math.sin(x / 90)) for x in range(0, W + 1, 40)] + [(W, 720)]
+        pygame.draw.polygon(s, (32, 16, 38, 235), pts)
+        for x in (190, 330, 950, 1090):                       # tombstones
+            r = pygame.Rect(0, 0, 58, 74)
+            r.midbottom = (x, 690)
+            pygame.draw.rect(s, (110, 108, 122), r, border_top_left_radius=29, border_top_right_radius=29)
+            draw_text(s, "RIP", font(15, bold=True), (60, 58, 70), (x, r.y + 30))
+        for x in (260, 1020):                                 # pumpkins
+            pygame.draw.ellipse(s, (230, 120, 20), (x - 22, 664, 44, 32))
+            pygame.draw.rect(s, (70, 110, 30), (x - 3, 658, 6, 8))
+        for i in range(6):                                    # fog
+            pygame.draw.ellipse(s, (160, 110, 200, 22), (rng.uniform(-100, W - 200), rng.uniform(610, 690), 420, 60))
+    elif name == "winter":
+        for i in range(40):                                   # stars
+            pygame.draw.circle(s, (255, 255, 255, 120), (rng.uniform(0, W), rng.uniform(60, 300)), 1)
+        pts = [(0, 720)] + [(x, 660 + 18 * math.sin(x / 110 + 1)) for x in range(0, W + 1, 40)] + [(W, 720)]
+        pygame.draw.polygon(s, (238, 246, 255, 240), pts)
+        for x, h in ((55, 190), (150, 150), (1130, 160), (1225, 200)):
+            _pine(s, x, 690, h, True)
+        for x in (300, 985):                                  # snowmen
+            for r, y in ((30, 668), (22, 626), (15, 594)):
+                pygame.draw.circle(s, (250, 252, 255), (x, y), r)
+                pygame.draw.circle(s, (200, 215, 235), (x, y), r, 2)
+            pygame.draw.rect(s, (25, 25, 30), (x - 13, 566, 26, 16))
+            pygame.draw.rect(s, (25, 25, 30), (x - 19, 580, 38, 5))
+            pygame.draw.polygon(s, (240, 130, 30), [(x, 594), (x + 16, 597), (x, 600)])
+            for ex in (-5, 5):
+                pygame.draw.circle(s, (20, 20, 25), (x + ex, 589), 2)
+            pygame.draw.rect(s, (200, 40, 40), (x - 20, 606, 40, 6))
+    elif name == "valentines":
+        for i in range(14):                                   # faint big hearts
+            draw_heart(s, rng.uniform(0, W), rng.uniform(80, 640), rng.uniform(20, 45), (255, 120, 170, 26))
+        for x in range(20, W, 46):                            # roses
+            y = 690 + (x % 3) * 6
+            pygame.draw.line(s, (40, 120, 50), (x, 720), (x, y), 3)
+            pygame.draw.ellipse(s, (60, 150, 60), (x - 12, y + 10, 12, 7))
+            pygame.draw.circle(s, (200, 20, 60), (x, y), 11)
+            pygame.draw.circle(s, (240, 60, 100), (x - 2, y - 2), 6)
+        for bx in (95, 1185):                                 # balloon bouquets
+            for i, (dx, dy, col) in enumerate(((-26, 520, (230, 40, 80)), (0, 490, (255, 120, 170)),
+                                                (26, 520, (255, 70, 120)))):
+                pygame.draw.line(s, (240, 240, 240, 180), (bx + dx, dy + 24), (bx, 660), 1)
+                draw_heart(s, bx + dx, dy, 20, col)
+    elif name == "easter":
+        pts = [(0, 720)] + [(x, 668 + 10 * math.sin(x / 70)) for x in range(0, W + 1, 30)] + [(W, 720)]
+        pygame.draw.polygon(s, (110, 190, 90, 240), pts)
+        for x in range(0, W, 9):                              # grass blades
+            h = rng.uniform(10, 24)
+            pygame.draw.line(s, (90, 170, 70), (x, 676), (x + rng.uniform(-4, 4), 676 - h), 2)
+        for x in range(30, W, 70):
+            _flower(s, x + rng.uniform(-15, 15), rng.uniform(672, 700), 6,
+                    rng.choice([(255, 190, 220), (200, 180, 255), (255, 255, 255), (255, 230, 120)]))
+        for x, col in ((420, (255, 190, 220)), (470, (190, 230, 255)), (860, (255, 240, 170))):
+            pygame.draw.ellipse(s, col, (x - 12, 668, 24, 30))
+        x = 150                                               # bunny
+        pygame.draw.ellipse(s, (250, 250, 250), (x - 30, 620, 60, 62))
+        pygame.draw.circle(s, (250, 250, 250), (x, 610), 22)
+        for ex in (-9, 9):
+            pygame.draw.ellipse(s, (250, 250, 250), (x + ex - 7, 548, 14, 52))
+            pygame.draw.ellipse(s, (255, 190, 210), (x + ex - 4, 556, 8, 38))
+            pygame.draw.circle(s, (30, 30, 30), (x + ex * 0.8, 606), 3)
+        pygame.draw.circle(s, (255, 150, 180), (x, 614), 3)
+        x = 1130                                              # chick
+        pygame.draw.circle(s, (255, 220, 60), (x, 650), 24)
+        pygame.draw.circle(s, (255, 225, 80), (x, 620), 16)
+        pygame.draw.polygon(s, (240, 140, 30), [(x + 14, 618), (x + 26, 622), (x + 14, 626)])
+        pygame.draw.circle(s, (30, 30, 30), (x + 6, 616), 3)
+    elif name == "summer":
+        for i in range(10):                                   # sun glow
+            pygame.draw.circle(s, (255, 220, 120, 14), (1150, 110), 110 - i * 8)
+        pygame.draw.circle(s, (255, 215, 80), (1150, 110), 44)
+        pygame.draw.rect(s, (240, 215, 150, 240), (0, 690, W, 30))              # sand
+        for y, col in ((650, (40, 140, 210, 230)), (668, (60, 170, 230, 235))):    # sea
+            pts = [(0, 720)] + [(x, y + 6 * math.sin(x / 45)) for x in range(0, W + 1, 20)] + [(W, 720)]
+            pygame.draw.polygon(s, col, pts)
+        pygame.draw.rect(s, (240, 215, 150, 240), (0, 694, W, 26))
+        for x, d in ((70, 1), (1210, -1)):                    # palm trees
+            pts = [(x + d * (k * k * 0.05), 700 - k * 9) for k in range(0, 26)]
+            pygame.draw.lines(s, (120, 80, 40), False, pts, 9)
+            tx, ty = pts[-1]
+            for a in range(0, 360, 50):
+                ang = math.radians(a)
+                pygame.draw.line(s, (40, 140, 60), (tx, ty), (tx + math.cos(ang) * 70, ty + math.sin(ang) * 30 + 12), 6)
+        x = 330                                               # beach umbrella
+        pygame.draw.line(s, (90, 70, 50), (x, 700), (x + 10, 610), 4)
+        for i in range(6):
+            a0, a1 = math.pi + i * math.pi / 6, math.pi + (i + 1) * math.pi / 6
+            pts = [(x + 10, 612)] + [(x + 10 + math.cos(a) * 70, 612 + math.sin(a) * 40)
+                                     for a in (a0 + (a1 - a0) * k / 6 for k in range(7))]
+            pygame.draw.polygon(s, (230, 60, 60) if i % 2 else (255, 255, 255), pts)
+        x = 990                                               # beach ball
+        for i, col in enumerate(((230, 60, 60), (255, 255, 255), (60, 120, 230), (255, 210, 60))):
+            pygame.draw.circle(s, col, (x, 684), 20, draw_top_left=i == 0, draw_top_right=i == 1,
+                               draw_bottom_left=i == 2, draw_bottom_right=i == 3)
+    return s
+
+
+def make_corners(name):
+    """Small decorations tucked into the top corners (under the top bar) in every game."""
+    s = pygame.Surface((W, H), pygame.SRCALPHA)
+    y0 = 58
+    if name == "halloween":
+        _web(s, 0, y0, 110, False)
+        _web(s, W, y0, 110, True)
+    elif name == "winter":
+        for cx, cy, r in ((30, y0 + 34, 22), (74, y0 + 18, 12), (W - 30, y0 + 34, 22), (W - 74, y0 + 18, 12)):
+            for k in range(6):
+                a = k * math.pi / 3
+                pygame.draw.line(s, (230, 245, 255, 200), (cx, cy), (cx + math.cos(a) * r, cy + math.sin(a) * r), 2)
+                mx, my = cx + math.cos(a) * r * 0.55, cy + math.sin(a) * r * 0.55
+                for side in (-0.6, 0.6):
+                    pygame.draw.line(s, (230, 245, 255, 200), (mx, my),
+                                     (mx + math.cos(a + side) * r * 0.3, my + math.sin(a + side) * r * 0.3), 2)
+    elif name == "valentines":
+        for cx in (34, W - 34):                               # ribbon bows
+            cy = y0 + 22
+            pygame.draw.polygon(s, (220, 30, 70), [(cx, cy), (cx - 26, cy - 14), (cx - 26, cy + 14)])
+            pygame.draw.polygon(s, (220, 30, 70), [(cx, cy), (cx + 26, cy - 14), (cx + 26, cy + 14)])
+            pygame.draw.line(s, (220, 30, 70), (cx, cy), (cx - 12, cy + 34), 5)
+            pygame.draw.line(s, (220, 30, 70), (cx, cy), (cx + 12, cy + 34), 5)
+            pygame.draw.circle(s, (255, 90, 130), (cx, cy), 7)
+    elif name == "easter":
+        for cx in (28, W - 28):
+            for dx, dy, col in ((0, 26, (255, 190, 220)), (24 * (1 if cx < 640 else -1), 12, (200, 180, 255)),
+                                (14 * (1 if cx < 640 else -1), 46, (255, 240, 150))):
+                _flower(s, cx + dx, y0 + dy, 7, col)
+    elif name == "summer":
+        cx, cy = 44, y0 + 40
+        for k in range(12):
+            a = k * math.pi / 6
+            pygame.draw.line(s, (255, 210, 80, 220), (cx + math.cos(a) * 30, cy + math.sin(a) * 30),
+                             (cx + math.cos(a) * 44, cy + math.sin(a) * 44), 4)
+        pygame.draw.circle(s, (255, 215, 80), (cx, cy), 24)
+        pygame.draw.rect(s, (30, 30, 40), (cx - 16, cy - 6, 14, 8), border_radius=3)       # sunglasses
+        pygame.draw.rect(s, (30, 30, 40), (cx + 2, cy - 6, 14, 8), border_radius=3)
+        pygame.draw.line(s, (30, 30, 40), (cx - 2, cy - 3), (cx + 2, cy - 3), 2)
+        pygame.draw.arc(s, (150, 80, 20), (cx - 9, cy - 2, 18, 12), math.pi + 0.3, 2 * math.pi - 0.3, 2)
+    return s
+
+
+def new_extra(name, y=None):
+    """The bigger things drifting around: ghosts, snowflakes, balloons, butterflies, seagulls."""
+    e = {"x": random.uniform(0, W), "y": random.uniform(80, H - 80) if y is None else y,
+         "ph": random.uniform(0, 6.28), "s": random.uniform(0.8, 1.2)}
+    if name == "halloween":
+        e.update(x=random.choice([-60.0, W + 60.0]), vy=0.0)
+        e["vx"] = random.uniform(25, 45) * (1 if e["x"] < 0 else -1)
+    elif name == "winter":
+        e.update(y=-40.0 if y is None else y, vx=random.uniform(-10, 10), vy=random.uniform(20, 40))
+    elif name == "valentines":
+        e.update(y=H + 60.0 if y is None else y, vx=random.uniform(-8, 8), vy=-random.uniform(28, 45),
+                 col=random.choice([(230, 40, 80), (255, 120, 170), (255, 70, 120)]))
+    elif name == "easter":
+        e.update(vx=random.uniform(-40, 40), vy=random.uniform(-25, 25),
+                 col=random.choice([(255, 170, 60), (140, 190, 255), (255, 140, 200), (200, 160, 255)]))
+    else:
+        e.update(x=random.choice([-50.0, W + 50.0]), y=random.uniform(70, 330), vy=0.0)
+        e["vx"] = random.uniform(60, 110) * (1 if e["x"] < 0 else -1)
+    return e
+
+
+def draw_extra(surf, name, e, t):
+    x, y, s = e["x"], e["y"], e["s"]
+    if name == "halloween":                                   # a ghost
+        yy = y + math.sin(t * 2 + e["ph"]) * 10
+        g = pygame.Surface((60, 70), pygame.SRCALPHA)
+        pygame.draw.circle(g, (245, 245, 255, 190), (30, 26), 22)
+        pygame.draw.rect(g, (245, 245, 255, 190), (8, 26, 44, 28))
+        for k in range(4):
+            pygame.draw.circle(g, (245, 245, 255, 190), (13 + k * 11.5, 54), 6)
+        for ex in (22, 38):
+            pygame.draw.ellipse(g, (30, 30, 40), (ex - 4, 20, 8, 11))
+        pygame.draw.ellipse(g, (30, 30, 40), (26, 36, 8, 8))
+        if e["vx"] < 0:
+            g = pygame.transform.flip(g, True, False)
+        surf.blit(g, g.get_rect(center=(x, yy)))
+    elif name == "winter":                                    # a big snowflake crystal
+        r = 12 * s
+        rot = t * 0.6 + e["ph"]
+        for k in range(6):
+            a = rot + k * math.pi / 3
+            ex, ey = x + math.cos(a) * r, y + math.sin(a) * r
+            pygame.draw.line(surf, (240, 250, 255), (x, y), (ex, ey), 2)
+            mx, my = x + math.cos(a) * r * 0.6, y + math.sin(a) * r * 0.6
+            for side in (-0.7, 0.7):
+                pygame.draw.line(surf, (240, 250, 255), (mx, my), (mx + math.cos(a + side) * r * 0.35,
+                                                                   my + math.sin(a + side) * r * 0.35), 1)
+    elif name == "valentines":                                # a heart balloon on a string
+        sway = math.sin(t * 1.4 + e["ph"]) * 8
+        pts = [(x + sway, y + 18 * s)] + [(x + sway + math.sin(t * 2 + k) * 3, y + 18 * s + k * 9) for k in range(1, 7)]
+        pygame.draw.lines(surf, (240, 240, 240), False, pts, 1)
+        draw_heart(surf, x + sway, y, 16 * s, e["col"])
+        pygame.draw.circle(surf, (255, 255, 255), (x + sway - 7 * s, y - 6 * s), 3)
+    elif name == "easter":                                    # a butterfly
+        flap = abs(math.sin(t * 10 + e["ph"]))
+        w = 12 * s * (0.3 + 0.7 * flap)
+        for side in (-1, 1):
+            pygame.draw.ellipse(surf, e["col"], (x + (0 if side > 0 else -w), y - 10 * s, w, 12 * s))
+            pygame.draw.ellipse(surf, e["col"], (x + (0 if side > 0 else -w * 0.8), y, w * 0.8, 9 * s))
+        pygame.draw.line(surf, (40, 30, 30), (x, y - 9 * s), (x, y + 8 * s), 2)
+    else:                                                     # a seagull
+        flap = math.sin(t * 7 + e["ph"]) * 6 * s
+        pygame.draw.lines(surf, (250, 250, 250), False, [(x - 16 * s, y - flap), (x - 7 * s, y - 4 * s), (x, y),
+                                                          (x + 7 * s, y - 4 * s), (x + 16 * s, y - flap)], 3)
+
+
+EXTRA_COUNT = {"halloween": 3, "winter": 7, "valentines": 4, "easter": 5, "summer": 4}
+
+
 class ThemeFX:
     """Seasonal looks: a colour grade over the whole game, things falling or floating, and decorations."""
 
@@ -15199,8 +15480,9 @@ class ThemeFX:
         self.app = app
         self.name = ""
         self.parts = []
+        self.extras = []
         self.t = 0.0
-        self.overlay = None
+        self.overlay = self.backdrop = self.corners = None
 
     def current(self):
         mine = getattr(self.app, "theme_mine", "")
@@ -15211,9 +15493,16 @@ class ThemeFX:
     def reset(self, name):
         self.name = name
         self.parts = []
-        self.overlay = None
+        self.extras = []
+        self.overlay = self.backdrop = self.corners = None
         if not name:
             return
+        self.backdrop = make_backdrop(name)
+        self.corners = make_corners(name)
+        for _ in range(EXTRA_COUNT[name]):
+            e = new_extra(name, random.uniform(80, H - 120))
+            e["x"] = random.uniform(60, W - 60)
+            self.extras.append(e)
         n = {"winter": 110, "halloween": 9, "valentines": 22, "easter": 26, "summer": 30}[name]
         for _ in range(n):
             self.parts.append(self.new_part(random.uniform(0, H)))
@@ -15258,6 +15547,22 @@ class ThemeFX:
             p["y"] += p["vy"] * dt
             if p["y"] > H + 30 or p["y"] < -40 or p["x"] < -80 or p["x"] > W + 80:
                 self.parts[i] = self.new_part()
+        for i, e in enumerate(self.extras):
+            if self.name == "easter" and random.random() < dt * 0.8:     # butterflies change their minds
+                e["vx"], e["vy"] = random.uniform(-45, 45), random.uniform(-30, 30)
+            e["x"] += e["vx"] * dt
+            e["y"] += e["vy"] * dt
+            if self.name == "easter":
+                e["y"] = max(80, min(H - 100, e["y"]))
+                if e["x"] < 20 or e["x"] > W - 20:
+                    e["vx"] = -e["vx"]
+            elif e["y"] > H + 60 or e["y"] < -80 or e["x"] < -90 or e["x"] > W + 90:
+                self.extras[i] = new_extra(self.name)
+
+    def draw_backdrop(self, surf):
+        """The seasonal scene - the lobby and main menu draw this behind everything else."""
+        if self.name and self.backdrop:
+            surf.blit(self.backdrop, (0, 0))
 
     def draw(self, surf, scene):
         if not self.name:
@@ -15266,11 +15571,28 @@ class ThemeFX:
         surf.fill(mult, special_flags=pygame.BLEND_RGB_MULT)
         surf.fill(add, special_flags=pygame.BLEND_RGB_ADD)
         surf.blit(self.overlay, (0, 0))
+        if scene not in ("title", "menu"):
+            surf.blit(self.corners, (0, 0))
         for p in self.parts:
             self.draw_part(surf, p)
+        for e in self.extras:
+            draw_extra(surf, self.name, e, self.t)
         self.draw_garland(surf, 0 if scene == "title" else 56)
+        if self.name == "halloween" and scene != "title":             # a spider going up and down its thread
+            sy = 56 + 70 + math.sin(self.t * 0.9) * 40
+            sx = 64
+            pygame.draw.line(surf, (220, 220, 230), (sx, 56), (sx, sy), 1)
+            for side in (-1, 1):
+                for k in range(4):
+                    ky = sy - 4 + k * 3
+                    pygame.draw.lines(surf, (20, 10, 25), False, [(sx, ky), (sx + side * 9, ky - 5 + k * 2),
+                                                                  (sx + side * 14, ky + 3 + k * 2)], 2)
+            pygame.draw.circle(surf, (20, 10, 25), (sx, sy), 7)
+            pygame.draw.circle(surf, (20, 10, 25), (sx, sy - 8), 4)
+            pygame.draw.circle(surf, (230, 30, 30), (sx - 2, sy - 9), 1)
+            pygame.draw.circle(surf, (230, 30, 30), (sx + 2, sy - 9), 1)
         if scene in ("menu", "title"):
-            draw_pill(surf, THEME_GREETING[self.name], font(18, bold=True), (W / 2, 641 if scene == "menu" else 22),
+            draw_pill(surf, THEME_GREETING[self.name], font(18, bold=True), (250, 106) if scene == "menu" else (W / 2, 22),
                       WHITE, (*[int(c * 0.35) for c in accent], 220), accent, pad=(16, 4))
 
     def draw_part(self, surf, p):
@@ -15311,6 +15633,13 @@ class ThemeFX:
             for x in range(6, W, 22):
                 ln = rng.uniform(8, 26)
                 pygame.draw.polygon(surf, (215, 235, 255), [(x - 5, y + 2), (x + 5, y + 2), (x, y + ln)])
+            cols = [(255, 70, 70), (80, 220, 90), (255, 210, 60), (80, 160, 255)]     # twinkling lights
+            pts = [(x, y + 10 + 8 * abs(math.sin(x / 88 * math.pi))) for x in range(0, W + 1, 22)]
+            pygame.draw.lines(surf, (40, 60, 40), False, pts, 2)
+            for i, (bx, by) in enumerate(pts[1::2]):
+                on = (i + int(self.t * 3)) % 3 != 0
+                col = cols[i % 4] if on else tuple(c // 3 for c in cols[i % 4])
+                pygame.draw.ellipse(surf, col, (bx - 4, by, 8, 11))
             return
         pygame.draw.line(surf, (60, 50, 40), (0, y + 2), (W, y + 2), 2)
         if n == "summer":                                    # party flags
@@ -16179,6 +16508,7 @@ class Menu:
             img.set_alpha(70)
             surf.blit(img, img.get_rect(center=(c["x"] + math.sin(self.t * 0.8 + c["sway"]) * 18, c["y"])))
         surf.blit(self.vignette, (0, 0))
+        self.app.themefx.draw_backdrop(surf)
 
     def draw_title(self, surf):
         self.title_glow.set_alpha(int(150 + 90 * math.sin(self.t * 1.6)))
