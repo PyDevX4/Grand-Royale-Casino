@@ -9,6 +9,12 @@ create table if not exists public.casino_players (
   updated_at timestamptz not null default now()
 );
 
+-- balance: the player's chips. You can edit it in Table Editor -> casino_players; the player's game picks up
+-- your new number within about 30 seconds (or the next time they log in).
+alter table public.casino_players add column if not exists balance bigint;
+-- is_owner: tick it on your own row. Players can't change it.
+alter table public.casino_players add column if not exists is_owner boolean not null default false;
+
 -- Usernames are unique no matter the upper/lower case
 create unique index if not exists casino_players_username_key on public.casino_players (lower(username));
 
@@ -31,10 +37,10 @@ drop policy if exists "delete own row" on public.casino_players;
 create policy "delete own row" on public.casino_players
   for delete using (auth.uid() = id);
 
--- Players can only write their own username and progress (nothing else)
+-- Players can only write their own username, progress and balance - never is_owner
 revoke insert, update on public.casino_players from authenticated, anon;
-grant insert (id, username, progress) on public.casino_players to authenticated;
-grant update (progress, updated_at) on public.casino_players to authenticated;
+grant insert (id, username, progress, balance) on public.casino_players to authenticated;
+grant update (progress, balance, updated_at) on public.casino_players to authenticated;
 grant select, delete on public.casino_players to authenticated;
 
 -- Lets the game say "that username is taken" before signing up, without showing anyone's data

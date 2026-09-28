@@ -13293,7 +13293,10 @@ class Settings:
             r.w = 500
             pygame.draw.rect(surf, (6, 6, 14), r, border_radius=10)
             pygame.draw.rect(surf, (100, 95, 140), r, width=2, border_radius=10)
-            draw_text(surf, app.session.name, font(24, bold=True), WHITE, (r.x + 16, r.centery), anchor="midleft")
+            nm = draw_text(surf, app.session.name, font(24, bold=True), WHITE, (r.x + 16, r.centery), anchor="midleft")
+            if app.session.is_owner:
+                draw_pill(surf, "OWNER", font(12, bold=True), (nm.right + 40, r.centery), (40, 25, 0), GOLD, None,
+                          pad=(8, 2))
             state = {"saving": "saving...", "offline": "offline", "saved": "saved"}.get(app.cloud_state, "online")
             draw_text(surf, state, font(13, bold=True), (140, 220, 160), (r.right - 14, r.centery), anchor="midright")
             self.btn_logout.draw(surf, mouse)
@@ -14596,6 +14599,9 @@ class Session:
         self.user_id = auth["user"]["id"]
         self.email_name = str(auth["user"].get("email", "player@")).split("@")[0]
         self.name = name
+        self.is_owner = False            # set in Supabase (casino_players.is_owner) - players can't change it
+        self.synced_balance = None       # the balance column as we last wrote it (to spot the owner editing it)
+        self.has_balance_column = True   # False on a database from before the balance column existed
         self.update(auth)
 
     def update(self, auth):
@@ -14648,17 +14654,29 @@ def flow_refresh(session):
 
 def flow_open(session, typed_name, new_progress):
     """Load the player's row - or create it if it's missing."""
-    r = yield HttpReq("GET", f"/rest/v1/{ACCOUNT_TABLE}?id=eq.{session.user_id}&select=username,progress",
-                      token=session.access)
+    r = yield HttpReq("GET", f"/rest/v1/{ACCOUNT_TABLE}?id=eq.{session.user_id}"
+                             "&select=username,progress,balance,is_owner", token=session.access)
+    if r.status == 400 and "does not exist" in r.message():     # an older database without those columns
+        session.has_balance_column = False
+        r = yield HttpReq("GET", f"/rest/v1/{ACCOUNT_TABLE}?id=eq.{session.user_id}&select=username,progress",
+                          token=session.access)
     need(r, "LOADING YOUR ACCOUNT")
     rows = r.data if isinstance(r.data, list) else []
     if rows:
-        session.name = rows[0]["username"]
-        return rows[0].get("progress") or {}
+        row = rows[0]
+        session.name = row["username"]
+        session.is_owner = bool(row.get("is_owner"))
+        progress = row.get("progress") or {}
+        if row.get("balance") is not None:     # the balance column wins - the owner may have edited it
+            progress["balance"] = int(row["balance"])
+            session.synced_balance = int(row["balance"])
+        return progress
     name = typed_name or session.email_name
-    r = yield HttpReq("POST", f"/rest/v1/{ACCOUNT_TABLE}", {"id": session.user_id, "username": name,
-                                                            "progress": new_progress},
-                      token=session.access, prefer="return=minimal")
+    body = {"id": session.user_id, "username": name, "progress": new_progress}
+    if session.has_balance_column:
+        body["balance"] = int(new_progress.get("balance", START_BALANCE))
+        session.synced_balance = body["balance"]
+    r = yield HttpReq("POST", f"/rest/v1/{ACCOUNT_TABLE}", body, token=session.access, prefer="return=minimal")
     need(r, "CREATING YOUR ACCOUNT")
     session.name = name
     return new_progress
@@ -14703,12 +14721,30 @@ def flow_resume(refresh_token):
 
 
 def flow_save(session, progress):
+    """Upload your progress. If the owner changed your balance in Supabase since the last save, their number
+    wins: it's put into this save, and the game is told (returns ("edited", new balance))."""
     yield from flow_refresh(session)
-    r = yield HttpReq("PATCH", f"/rest/v1/{ACCOUNT_TABLE}?id=eq.{session.user_id}",
-                      {"progress": progress, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+    edited = None
+    if session.has_balance_column:
+        r = yield HttpReq("GET", f"/rest/v1/{ACCOUNT_TABLE}?id=eq.{session.user_id}&select=balance,is_owner",
+                          token=session.access)
+        need(r, "SAVING")
+        rows = r.data if isinstance(r.data, list) else []
+        if rows:
+            session.is_owner = bool(rows[0].get("is_owner"))
+            server = rows[0].get("balance")
+            if server is not None and session.synced_balance is not None and int(server) != session.synced_balance:
+                edited = int(server)
+                progress = dict(progress, balance=edited)
+    body = {"progress": progress, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if session.has_balance_column:
+        body["balance"] = int(progress.get("balance", 0))
+    r = yield HttpReq("PATCH", f"/rest/v1/{ACCOUNT_TABLE}?id=eq.{session.user_id}", body,
                       token=session.access, prefer="return=minimal")
     need(r, "SAVING")
-    return True
+    if session.has_balance_column:
+        session.synced_balance = body["balance"]
+    return ("edited", edited) if edited is not None else True
 
 
 def flow_delete(session):
@@ -16943,6 +16979,11 @@ class App:
                     self.cloud_wait = 10.0
                 else:
                     self.cloud_state = "saved"
+                    res = self.cloud_flow.result
+                    if isinstance(res, tuple) and res[0] == "edited" and self.session:
+                        self.balance = res[1]
+                        self.effects.toast("YOUR CHIPS WERE CHANGED", f"The owner set your balance to {money(res[1])}")
+                        self.sfx("win")
                 if self.session and self.remember and self.session.refresh != self.remembered:
                     self.remembered = self.session.refresh
                     remember_save(self.remembered)
@@ -17326,7 +17367,7 @@ class App:
         if self.session:
             state = {"saving": "saving...", "offline": "offline - will retry", "saved": "saved online"}.get(
                 self.cloud_state, "online")
-            text += f"   |   {self.session.name}: {state}"
+            text += f"   |   {self.session.name}{' (OWNER)' if self.session.is_owner else ''}: {state}"
         elif self.account_flow and self.account_flow[0] == "resume":
             text += "   |   logging in..."
         else:
