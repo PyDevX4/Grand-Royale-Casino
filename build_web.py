@@ -49,13 +49,16 @@ asyncio.run(main())
 
 
 def make_music():
-    """Turn music/Jackpot.wav into a much smaller .ogg for the builds (36 MB -> ~3 MB). Returns the folder, or None."""
-    src = os.path.join(HERE, "music", "Jackpot.wav")
+    """Turn the Jackpot song in the music folder (.wav or .mp3) into a small .ogg for the builds.
+    Returns the folder it's in, or None."""
+    found = [os.path.join(HERE, "music", n) for n in sorted(os.listdir(os.path.join(HERE, "music")))
+             if n.lower().startswith("jackpot.") and n.lower().endswith((".wav", ".mp3"))]         if os.path.isdir(os.path.join(HERE, "music")) else []
     out_dir = os.path.join(HERE, "release", "music")
     out = os.path.join(out_dir, "jackpot.ogg")
-    if not os.path.exists(src):
-        print("no music/Jackpot.wav - building without the Jackpot song")
+    if not found:
+        print("no Jackpot song in the music folder - building without it")
         return None
+    src = found[0]
     if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
         return out_dir
     try:

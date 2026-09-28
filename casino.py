@@ -15112,7 +15112,7 @@ THEME_LOOK = {   # colour grade (multiply, then add) and the accent colour
 def music_file(name):
     """Where the Jackpot song is: bundled with the .exe, or in the music folder next to casino.py."""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
-    for fname in (name + ".ogg", name.capitalize() + ".wav", name + ".wav"):
+    for fname in (name + ".ogg", name.capitalize() + ".mp3", name + ".mp3", name.capitalize() + ".wav", name + ".wav"):
         path = os.path.join(base, "music", fname)
         if os.path.exists(path):
             return path

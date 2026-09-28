@@ -34,7 +34,7 @@ ICON = "icon.ico"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # What changed - shown on the GitHub release page. Edit before publishing if you like.
-NOTES = "The casino now runs in a web browser too - no download needed: https://pydevx4.github.io/Grand-Royale-Casino/ . The game installs this update by itself the next time you open it."
+NOTES = "Big update: online accounts (log in anywhere, progress saved online), seasonal themes that change the whole casino and its games, live events (Double Payouts, Chip Rain, Jackpot), and more. The game installs this update by itself the next time you open it."
 DOWNLOAD_NOTE = "\n".join([
     "---",
     "**To play: download the .zip below.** Unzip it and run \"Grand Royale Casino.exe\" inside.",
