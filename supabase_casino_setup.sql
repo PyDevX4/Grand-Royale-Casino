@@ -67,3 +67,86 @@ as $$
 $$;
 revoke execute on function public.delete_my_account() from anon;
 grant execute on function public.delete_my_account() to authenticated;
+
+-- ============================================================================================================
+-- Live events and themes: one shared row that every player's game checks every ~15 seconds.
+-- Nobody can read or change the table directly - only through the functions below, and only an account with
+-- is_owner = true can switch things on.
+-- ============================================================================================================
+create table if not exists public.casino_events (
+  id int primary key default 1 check (id = 1),
+  double_until timestamptz,
+  rain_until timestamptz,
+  jackpot_until timestamptz,
+  theme text not null default '',
+  updated_at timestamptz not null default now()
+);
+insert into public.casino_events (id) values (1) on conflict (id) do nothing;
+alter table public.casino_events enable row level security;
+
+-- Every game asks this: how many seconds each event has left, and the theme
+create or replace function public.casino_get_events()
+returns json
+language sql
+security definer
+set search_path = public
+as $$
+  select json_build_object(
+    'double', greatest(0, coalesce(extract(epoch from double_until - now()), 0)),
+    'rain', greatest(0, coalesce(extract(epoch from rain_until - now()), 0)),
+    'jackpot', greatest(0, coalesce(extract(epoch from jackpot_until - now()), 0)),
+    'theme', theme)
+  from public.casino_events where id = 1;
+$$;
+grant execute on function public.casino_get_events() to anon, authenticated;
+
+create or replace function public.casino_is_owner()
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select coalesce((select is_owner from public.casino_players where id = auth.uid()), false);
+$$;
+
+-- The owner menu: start an event for this many seconds (0 stops it)
+create or replace function public.casino_owner_event(which text, seconds int)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.casino_is_owner() then
+    raise exception 'only the owner can do that';
+  end if;
+  if which = 'double' then
+    update public.casino_events set double_until = now() + make_interval(secs => seconds), updated_at = now() where id = 1;
+  elsif which = 'rain' then
+    update public.casino_events set rain_until = now() + make_interval(secs => seconds), updated_at = now() where id = 1;
+  elsif which = 'jackpot' then
+    update public.casino_events set jackpot_until = now() + make_interval(secs => seconds), updated_at = now() where id = 1;
+  else
+    raise exception 'unknown event %', which;
+  end if;
+end;
+$$;
+revoke execute on function public.casino_owner_event(text, int) from anon, public;
+grant execute on function public.casino_owner_event(text, int) to authenticated;
+
+-- The owner menu: the theme for everyone ('' = none)
+create or replace function public.casino_owner_theme(new_theme text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.casino_is_owner() then
+    raise exception 'only the owner can do that';
+  end if;
+  update public.casino_events set theme = coalesce(new_theme, ''), updated_at = now() where id = 1;
+end;
+$$;
+revoke execute on function public.casino_owner_theme(text) from anon, public;
+grant execute on function public.casino_owner_theme(text) to authenticated;

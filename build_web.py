@@ -48,6 +48,31 @@ asyncio.run(main())
 '''
 
 
+def make_music():
+    """Turn music/Jackpot.wav into a much smaller .ogg for the builds (36 MB -> ~3 MB). Returns the folder, or None."""
+    src = os.path.join(HERE, "music", "Jackpot.wav")
+    out_dir = os.path.join(HERE, "release", "music")
+    out = os.path.join(out_dir, "jackpot.ogg")
+    if not os.path.exists(src):
+        print("no music/Jackpot.wav - building without the Jackpot song")
+        return None
+    if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(src):
+        return out_dir
+    try:
+        import soundfile as sf              # pip install soundfile
+    except ImportError:
+        print("pip install soundfile to include the Jackpot song")
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    info = sf.info(src)
+    with sf.SoundFile(out, "w", samplerate=info.samplerate, channels=info.channels, format="OGG",
+                      subtype="VORBIS") as dst:
+        for block in sf.blocks(src, blocksize=48000, dtype="float32"):   # in pieces: one big write crashes
+            dst.write(block)
+    print("made %s (%.1f MB)" % (out, os.path.getsize(out) / 1e6))
+    return out_dir
+
+
 def build():
     shutil.rmtree(SRC, ignore_errors=True)
     os.makedirs(SRC)
@@ -55,6 +80,9 @@ def build():
         shutil.copy(os.path.join(HERE, name), SRC)
     with open(os.path.join(SRC, "main.py"), "w", encoding="utf-8") as fh:
         fh.write(MAIN_PY)
+    music = make_music()
+    if music:
+        shutil.copytree(music, os.path.join(SRC, "music"))
     cmd = [sys.executable, "-m", "pygbag", "--build", "--title", "Grand Royale Casino", "--app_name",
            "grand_royale", "--width", "1280", "--height", "720", SRC]
     print(" ".join(cmd))

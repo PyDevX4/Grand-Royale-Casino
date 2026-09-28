@@ -2410,8 +2410,15 @@ class Slots:
         self.app.balance -= self.bet
         self.stake = self.bet
         self.anim = []
+        forced = None
+        ev = getattr(self.app, "events", None)
+        if ev and ev.active("jackpot") and random.random() < JACKPOT_CHANCE:
+            forced = []                                  # JACKPOT event: land three diamonds on the middle line
+            for r in range(3):
+                spots = [k for k, sym in enumerate(self.strips[r]) if sym == "diamond"]
+                forced.append((random.choice(spots) - 1) % self.L)
         for i in range(3):
-            stop = random.randrange(self.L)
+            stop = forced[i] if forced else random.randrange(self.L)
             start = self.pos[i]
             travel = (start - stop) % self.L + self.L * (2 + i)
             self.anim.append((start, travel, 1.1 + 0.45 * i, stop))
@@ -2434,6 +2441,10 @@ class Slots:
             elif a == "cherry":
                 self.wins.append((li, CHERRY_ONE, 1))
         self.win_total = self.stake // 5 * sum(m for _, m, _ in self.wins)
+        ev = getattr(self.app, "events", None)
+        self.jackpot_hit = bool(ev and ev.active("jackpot") and [grid[1][r] for r in range(3)] == ["diamond"] * 3)
+        if self.jackpot_hit:
+            self.win_total = max(self.win_total, self.stake * JACKPOT_PAY)
         self.app.balance += self.win_total
         self.app.record("slots", self.stake, self.win_total)
         if any(m in (SLOT_PAYS["seven"], SLOT_PAYS["diamond"]) for _, m, _ in self.wins):
@@ -2442,6 +2453,9 @@ class Slots:
         if self.win_total:
             self.big = self.win_total >= self.stake * 10
             self.message = ("BIG WIN!  " if self.big else "") + f"YOU WIN {money(self.win_total)}"
+            if self.jackpot_hit:
+                self.message = f"JACKPOT!!!  {JACKPOT_PAY}x  -  YOU WIN {money(self.win_total)}"
+                self.app.effects.chip_rain(120)
             self.app.float_text(f"+{money(self.win_total)}", (80, 230, 110))
             self.app.sfx("win")
             if self.big:
@@ -2574,6 +2588,13 @@ class Slots:
         self.btn_clear.draw(surf, mouse, not spinning and self.bet > 0)
         self.btn_spin.draw(surf, mouse, not spinning and 0 < self.bet <= self.app.balance)
 
+        ev = getattr(self.app, "events", None)
+        if ev and ev.active("jackpot"):
+            left = int(ev.left("jackpot"))
+            glow = 0.5 + 0.5 * math.sin(self.t * 6)
+            draw_pill(surf, f"JACKPOT EVENT  {left // 60}:{left % 60:02d}  -  3 DIAMONDS IN THE MIDDLE PAYS {JACKPOT_PAY}x!",
+                      font(17, bold=True), (641, 78), (30, 20, 0), (*lerp_col(GOLD, (255, 255, 255), glow * 0.4), 240),
+                      (255, 255, 255), pad=(16, 4))
         self.app.draw_top_bar(surf, "SLOTS", lobby=True, lobby_enabled=self.can_leave())
 
 
@@ -14987,6 +15008,492 @@ class AccountScreen:
 
 
 # --------------------------------------------------------------------------
+# Live events and seasonal themes - switched on by the owner, for everyone (see supabase_casino_setup.sql)
+# --------------------------------------------------------------------------
+EVENT_KINDS = ["double", "rain", "jackpot"]
+EVENT_NAMES = {"double": "DOUBLE PAYOUTS", "rain": "CHIP RAIN", "jackpot": "JACKPOT"}
+EVENT_INFO = {"double": "Every win pays double!", "rain": "Click the falling chips to grab them!",
+              "jackpot": "Three diamonds on the middle line of the slots pays 250x!"}
+JACKPOT_SECONDS = 3 * 60 + 3
+JACKPOT_PAY = 250
+JACKPOT_CHANCE = 0.015           # during Jackpot, this share of slot spins land three diamonds in the middle
+EVENT_POLL = 15.0                # seconds between checks for the owner's switches
+RAIN_VALUES = [10, 25, 50, 100, 250, 500, 1000]
+RAIN_WEIGHTS = [30, 25, 18, 12, 8, 5, 2]
+THEMES = ["halloween", "winter", "valentines", "easter", "summer"]
+THEME_NAMES = {"halloween": "HALLOWEEN", "winter": "WINTER", "valentines": "VALENTINE'S", "easter": "EASTER",
+               "summer": "SUMMER", "": "NONE"}
+THEME_GREETING = {"halloween": "HAPPY HALLOWEEN!", "winter": "HAPPY HOLIDAYS!", "valentines": "HAPPY VALENTINE'S DAY!",
+                  "easter": "HAPPY EASTER!", "summer": "SUMMER VIBES!"}
+THEME_LOOK = {   # colour grade (multiply, then add) and the accent colour
+    "halloween": ((255, 200, 170), (16, 2, 20), (255, 140, 20)),
+    "winter": ((205, 222, 255), (10, 14, 26), (170, 220, 255)),
+    "valentines": ((255, 205, 222), (22, 0, 10), (255, 110, 160)),
+    "easter": ((232, 255, 228), (10, 14, 6), (190, 150, 240)),
+    "summer": ((255, 242, 205), (24, 14, 0), (255, 200, 60)),
+}
+
+
+def music_file(name):
+    """Where the Jackpot song is: bundled with the .exe, or in the music folder next to casino.py."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    for fname in (name + ".ogg", name.capitalize() + ".wav", name + ".wav"):
+        path = os.path.join(base, "music", fname)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def flow_owner(session, rpc, body):
+    yield from flow_refresh(session)
+    r = yield HttpReq("POST", f"/rest/v1/rpc/{rpc}", body, token=session.access)
+    if r.status in (400, 401, 403) and "owner" in r.message().lower():
+        raise AccountError("ONLY THE OWNER CAN DO THAT")
+    need(r, "SENDING")
+    return True
+
+
+def draw_heart(surf, x, y, s, col):
+    pygame.draw.circle(surf, col, (x - s * 0.5, y - s * 0.2), s * 0.55)
+    pygame.draw.circle(surf, col, (x + s * 0.5, y - s * 0.2), s * 0.55)
+    pygame.draw.polygon(surf, col, [(x - s * 1.02, y - s * 0.02), (x + s * 1.02, y - s * 0.02), (x, y + s * 1.05)])
+
+
+class LiveEvents:
+    """Checks Supabase for the owner's events and theme, and runs them on this computer."""
+
+    def __init__(self, app):
+        self.app = app
+        self.ends = {k: 0.0 for k in EVENT_KINDS}
+        self.was = {k: False for k in EVENT_KINDS}
+        self.theme = ""                  # the theme the owner picked for everyone
+        self.req = None
+        self.poll_t = 0.0
+        self.owner_flow = None
+        self.owner_msg = ""
+        self.rain = []
+        self.rain_t = 0.0
+        self.music = False
+        self.t = 0.0
+
+    def active(self, kind):
+        return time.time() < self.ends[kind]
+
+    def left(self, kind):
+        return max(0.0, self.ends[kind] - time.time())
+
+    def owner_action(self, rpc, body, done_msg):
+        if not self.app.session:
+            return
+        self.owner_msg = "SENDING..."
+        self.owner_flow = (Flow(flow_owner(self.app.session, rpc, body)), done_msg)
+
+    def tick(self, dt):
+        self.t += dt
+        if self.req:
+            if self.req.poll():
+                if self.req.ok and isinstance(self.req.data, dict):
+                    now = time.time()
+                    for k in EVENT_KINDS:
+                        left = float(self.req.data.get(k) or 0)
+                        self.ends[k] = now + left if left > 0.5 else 0.0
+                    self.theme = str(self.req.data.get("theme") or "")
+                self.req = None
+        else:
+            self.poll_t -= dt
+            if self.poll_t <= 0:
+                self.poll_t = EVENT_POLL
+                self.req = HttpReq("POST", "/rest/v1/rpc/casino_get_events", {})
+        if self.owner_flow:
+            flow, msg = self.owner_flow
+            if flow.poll():
+                self.owner_msg = flow.error or msg
+                self.owner_flow = None
+                self.poll_t = 0.0                 # see the change straight away
+        for k in EVENT_KINDS:
+            on = self.active(k)
+            if on != self.was[k]:
+                self.was[k] = on
+                (self.started if on else self.ended)(k)
+        # chip rain
+        if self.active("rain"):
+            self.rain_t -= dt
+            while self.rain_t <= 0:
+                self.rain_t += random.uniform(0.25, 0.55)
+                self.rain.append({"x": random.uniform(40, W - 40), "y": -30.0, "vy": random.uniform(120, 230),
+                                  "spin": random.uniform(0, 6), "vs": random.uniform(3, 7), "r": 24,
+                                  "v": random.choices(RAIN_VALUES, RAIN_WEIGHTS)[0]})
+        for c in self.rain:
+            c["y"] += c["vy"] * dt
+            c["spin"] += c["vs"] * dt
+        self.rain = [c for c in self.rain if c["y"] < H + 40]
+        # the Jackpot song follows the event (and stops if sound is switched off)
+        want = self.active("jackpot") and self.app.sound_on
+        if want != self.music:
+            self.music = want
+            if want:
+                self.play_song()
+            else:
+                try:
+                    pygame.mixer.music.fadeout(1200)
+                except Exception:
+                    pass
+
+    def play_song(self):
+        path = music_file("jackpot")
+        if not path or not pygame.mixer.get_init():
+            return
+        try:
+            pygame.mixer.music.load(path)
+            into = max(0.0, JACKPOT_SECONDS - self.left("jackpot"))
+            try:
+                pygame.mixer.music.play(start=into)          # joined late: pick the song up where it is
+            except Exception:
+                pygame.mixer.music.play()
+        except Exception:
+            pass
+
+    def started(self, kind):
+        left = int(self.left(kind))
+        self.app.effects.toast(f"EVENT: {EVENT_NAMES[kind]}!", f"{EVENT_INFO[kind]}  ({left // 60}:{left % 60:02d})",
+                               "up")
+        self.app.sfx("alert")
+
+    def ended(self, kind):
+        self.app.effects.toast(f"{EVENT_NAMES[kind]} IS OVER", "Thanks for playing!")
+        if kind == "rain":
+            self.rain = []
+
+    def grab(self, pos):
+        """Clicked a raining chip? It's yours."""
+        for c in reversed(self.rain):
+            if math.hypot(pos[0] - c["x"], pos[1] - c["y"]) <= c["r"] + 6:
+                self.rain.remove(c)
+                self.app.balance += c["v"]
+                self.app.float_text(f"+{money(c['v'])}", (80, 230, 110))
+                self.app.effects.burst(c["x"], c["y"], 14, [(255, 220, 90), (255, 255, 255)])
+                self.app.sfx("chip")
+                return True
+        return False
+
+    def draw(self, surf):
+        for c in self.rain:
+            w = max(2, int(2 * c["r"] * abs(math.cos(c["spin"]))))
+            img = pygame.transform.smoothscale(self.app.assets.chip(c["v"], c["r"]), (w, 2 * c["r"]))
+            surf.blit(img, img.get_rect(center=(c["x"], c["y"])))
+        on = [k for k in EVENT_KINDS if self.active(k)]
+        for i, k in enumerate(on):
+            left = int(self.left(k))
+            text = f"{EVENT_NAMES[k]}  {left // 60}:{left % 60:02d}"
+            col = {"double": (120, 240, 140), "rain": (140, 200, 255), "jackpot": GOLD}[k]
+            glow = 0.5 + 0.5 * math.sin(self.t * 5 + i)
+            draw_pill(surf, text, font(14, bold=True), (W - 140, 76 + i * 30), (20, 15, 5) if k == "jackpot" else WHITE,
+                      (*lerp_col(col, (255, 255, 255), glow * 0.2), 235) if k == "jackpot" else (0, 0, 0, 200),
+                      col, pad=(12, 3))
+
+
+class ThemeFX:
+    """Seasonal looks: a colour grade over the whole game, things falling or floating, and decorations."""
+
+    def __init__(self, app):
+        self.app = app
+        self.name = ""
+        self.parts = []
+        self.t = 0.0
+        self.overlay = None
+
+    def current(self):
+        mine = getattr(self.app, "theme_mine", "")
+        if mine:
+            return "" if mine == "none" else mine
+        return self.app.events.theme if self.app.events.theme in THEMES else ""
+
+    def reset(self, name):
+        self.name = name
+        self.parts = []
+        self.overlay = None
+        if not name:
+            return
+        n = {"winter": 110, "halloween": 9, "valentines": 22, "easter": 26, "summer": 30}[name]
+        for _ in range(n):
+            self.parts.append(self.new_part(random.uniform(0, H)))
+        o = pygame.Surface((W, H), pygame.SRCALPHA)       # a soft glow around the edges in the theme's colour
+        accent = THEME_LOOK[name][2]
+        for i in range(40):
+            k = i / 39
+            pygame.draw.rect(o, (*accent, int(34 * (1 - k) ** 2)), (i * 6, i * 4, W - i * 12, H - i * 8), width=6)
+        if name == "summer":
+            for i in range(30):
+                pygame.draw.circle(o, (255, 230, 120, 3), (60, 40), 420 - i * 13)
+        self.overlay = o
+
+    def new_part(self, y=None):
+        n = self.name
+        p = {"x": random.uniform(0, W), "y": -20.0 if y is None else y, "s": random.uniform(0.6, 1.4),
+             "ph": random.uniform(0, 6.28)}
+        if n == "winter":
+            p.update(vy=random.uniform(30, 90), vx=random.uniform(-15, 15))
+        elif n == "halloween":
+            p.update(x=random.choice([-40.0, W + 40.0]), y=random.uniform(70, H * 0.6), vy=random.uniform(-10, 10))
+            p["vx"] = random.uniform(70, 140) * (1 if p["x"] < 0 else -1)
+        elif n == "valentines":
+            p.update(y=H + 20.0 if y is None else y, vy=-random.uniform(25, 60), vx=0.0,
+                     col=random.choice([(255, 90, 140), (230, 40, 80), (255, 170, 200)]))
+        elif n == "easter":
+            egg = random.random() < 0.3
+            p.update(vy=random.uniform(30, 70), vx=random.uniform(10, 40), egg=egg,
+                     col=random.choice([(255, 190, 220), (190, 230, 255), (255, 240, 170), (200, 255, 200),
+                                        (225, 200, 255)]))
+        else:
+            p.update(y=H + 20.0 if y is None else y, vy=-random.uniform(20, 55), vx=random.uniform(-8, 8))
+        return p
+
+    def update(self, dt):
+        self.t += dt
+        name = self.current()
+        if name != self.name:
+            self.reset(name)
+        for i, p in enumerate(self.parts):
+            p["x"] += (p["vx"] + (math.sin(self.t * 1.3 + p["ph"]) * 18 if self.name in ("winter", "easter") else 0)) * dt
+            p["y"] += p["vy"] * dt
+            if p["y"] > H + 30 or p["y"] < -40 or p["x"] < -80 or p["x"] > W + 80:
+                self.parts[i] = self.new_part()
+
+    def draw(self, surf, scene):
+        if not self.name:
+            return
+        mult, add, accent = THEME_LOOK[self.name]
+        surf.fill(mult, special_flags=pygame.BLEND_RGB_MULT)
+        surf.fill(add, special_flags=pygame.BLEND_RGB_ADD)
+        surf.blit(self.overlay, (0, 0))
+        for p in self.parts:
+            self.draw_part(surf, p)
+        self.draw_garland(surf, 0 if scene == "title" else 56)
+        if scene in ("menu", "title"):
+            draw_pill(surf, THEME_GREETING[self.name], font(18, bold=True), (W / 2, 641 if scene == "menu" else 22),
+                      WHITE, (*[int(c * 0.35) for c in accent], 220), accent, pad=(16, 4))
+
+    def draw_part(self, surf, p):
+        x, y, s = p["x"], p["y"], p["s"]
+        n = self.name
+        if n == "winter":
+            pygame.draw.circle(surf, (245, 250, 255), (x, y), 1.5 + 2.2 * s)
+        elif n == "halloween":
+            flap = math.sin(self.t * 12 + p["ph"]) * 10 * s
+            d = 1 if p["vx"] > 0 else -1
+            body = (18, 10, 24)
+            pygame.draw.ellipse(surf, body, (x - 7 * s, y - 5 * s, 14 * s, 10 * s))
+            for side in (-1, 1):
+                tip = (x + side * 26 * s, y - flap)
+                pygame.draw.polygon(surf, body, [(x + side * 4 * s, y - 3 * s), tip,
+                                                 (x + side * 16 * s, y + 4 * s - flap * 0.3), (x + side * 8 * s, y + 5 * s)])
+            pygame.draw.circle(surf, (255, 160, 40), (x + d * 3 * s, y - 2 * s), max(1, s * 1.4))
+        elif n == "valentines":
+            draw_heart(surf, x + math.sin(self.t * 1.5 + p["ph"]) * 14, y, 9 * s, p["col"])
+        elif n == "easter":
+            if p["egg"]:
+                r = pygame.Rect(0, 0, 16 * s, 21 * s)
+                r.center = (x, y)
+                pygame.draw.ellipse(surf, p["col"], r)
+                pygame.draw.line(surf, (255, 255, 255), (r.x + 2, r.centery), (r.right - 2, r.centery), 2)
+            else:
+                pygame.draw.ellipse(surf, p["col"], (x - 6 * s, y - 3 * s, 12 * s, 6 * s))
+        else:
+            r = 5 + 6 * s
+            pygame.draw.circle(surf, (255, 255, 255), (x, y), r, 1)
+            pygame.draw.circle(surf, (255, 250, 220), (x - r * 0.35, y - r * 0.35), max(1, r * 0.25))
+
+    def draw_garland(self, surf, y):
+        n = self.name
+        if n == "winter":                                    # icicles and a line of snow
+            pygame.draw.rect(surf, (240, 248, 255), (0, y - 3, W, 6), border_radius=3)
+            rng = random.Random(7)
+            for x in range(6, W, 22):
+                ln = rng.uniform(8, 26)
+                pygame.draw.polygon(surf, (215, 235, 255), [(x - 5, y + 2), (x + 5, y + 2), (x, y + ln)])
+            return
+        pygame.draw.line(surf, (60, 50, 40), (0, y + 2), (W, y + 2), 2)
+        if n == "summer":                                    # party flags
+            cols = [(255, 90, 90), (255, 200, 60), (80, 200, 255), (120, 230, 120), (255, 140, 220)]
+            for i, x in enumerate(range(10, W, 44)):
+                pygame.draw.polygon(surf, cols[i % len(cols)], [(x, y + 2), (x + 34, y + 2), (x + 17, y + 26)])
+            return
+        for i, x in enumerate(range(40, W, 110)):
+            sway = math.sin(self.t * 2 + i) * 2
+            cy = y + 14 + sway
+            pygame.draw.line(surf, (60, 50, 40), (x, y + 2), (x, cy - 8), 1)
+            if n == "halloween":                             # jack-o'-lanterns
+                pygame.draw.ellipse(surf, (230, 120, 20), (x - 12, cy - 9, 24, 19))
+                pygame.draw.rect(surf, (70, 110, 30), (x - 2, cy - 13, 4, 5))
+                for ex in (-5, 5):
+                    pygame.draw.polygon(surf, (40, 15, 0), [(x + ex - 3, cy - 1), (x + ex + 3, cy - 1), (x + ex, cy - 5)])
+                pygame.draw.line(surf, (40, 15, 0), (x - 6, cy + 4), (x + 6, cy + 4), 2)
+            elif n == "valentines":
+                draw_heart(surf, x, cy, 9, (230, 40, 80) if i % 2 else (255, 120, 170))
+            elif n == "easter":
+                col = [(255, 190, 220), (190, 230, 255), (255, 240, 170), (200, 255, 200)][i % 4]
+                pygame.draw.ellipse(surf, col, (x - 9, cy - 11, 18, 23))
+                pygame.draw.line(surf, (255, 255, 255), (x - 8, cy), (x + 8, cy), 3)
+
+
+class OwnerMenu:
+    """The ` menu - only for accounts marked is_owner in Supabase."""
+    PANEL = pygame.Rect(170, 60, 940, 600)
+
+    def __init__(self, app):
+        self.app = app
+        self.active = False
+        self.money_text = ""
+        self.editing = False
+        self.minutes = {"double": 10, "rain": 5}
+        self.scope = "everyone"
+        P = self.PANEL
+        self.money_box = pygame.Rect(P.x + 40, P.y + 104, 300, 50)
+        self.btn_set = Button((P.x + 352, P.y + 104, 110, 50), "SET", (25, 120, 60), 20)
+        self.btn_quick = [(Button((P.x + 476 + i * 106, P.y + 104, 98, 50), label, (60, 60, 90), 17), amt)
+                          for i, (label, amt) in enumerate((("+10K", 10000), ("+1M", 10 ** 6), ("$500", None)))]
+        self.rows = {}
+        for i, k in enumerate(EVENT_KINDS):
+            y = P.y + 230 + i * 70
+            self.rows[k] = {"minus": Button((P.x + 330, y, 44, 48), "-", (60, 60, 90), 22),
+                            "plus": Button((P.x + 470, y, 44, 48), "+", (60, 60, 90), 22),
+                            "start": Button((P.x + 540, y, 150, 48), "START", (25, 120, 60), 18),
+                            "stop": Button((P.x + 700, y, 110, 48), "STOP", (150, 35, 40), 18), "y": y}
+        self.theme_btns = [(Button((P.x + 40 + i * 146, P.y + 490, 138, 48), THEME_NAMES[t], (70, 60, 100), 15), t)
+                           for i, t in enumerate([""] + THEMES)]
+        self.scope_btns = [(Button((P.x + 560 + i * 170, P.y + 430, 160, 40), label, (40, 60, 110), 15), s)
+                           for i, (label, s) in enumerate((("EVERYONE", "everyone"), ("JUST ME", "me")))]
+        self.btn_close = Button((P.right - 60, P.y + 16, 44, 40), "X", (120, 35, 40), 20)
+
+    def allowed(self):
+        return bool(self.app.session and self.app.session.is_owner)
+
+    def toggle(self):
+        self.active = not self.active and self.allowed()
+        self.editing = False
+
+    def handle(self, e):
+        app, ev = self.app, self.app.events
+        if e.type == pygame.KEYDOWN:
+            if e.key in (pygame.K_BACKQUOTE, pygame.K_ESCAPE):
+                self.active = False
+            elif self.editing:
+                if e.key == pygame.K_BACKSPACE:
+                    self.money_text = self.money_text[:-1]
+                elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                    self.set_money()
+                elif e.unicode and e.unicode.isdigit() and len(self.money_text) < 13:
+                    self.money_text += e.unicode
+            return
+        if e.type != pygame.MOUSEBUTTONDOWN or e.button != 1:
+            return
+        pos = e.pos
+        self.editing = self.money_box.collidepoint(pos)
+        if self.btn_close.clicked(pos):
+            self.active = False
+        elif self.btn_set.clicked(pos):
+            self.set_money()
+        for b, amt in self.btn_quick:
+            if b.clicked(pos):
+                app.balance = START_BALANCE if amt is None else app.balance + amt
+                app.save()
+                ev.owner_msg = f"YOUR CHIPS: {money(app.balance)}"
+        busy = bool(ev.owner_flow)
+        for k, row in self.rows.items():
+            if k in self.minutes:
+                if row["minus"].clicked(pos):
+                    self.minutes[k] = max(1, self.minutes[k] - (5 if self.minutes[k] > 5 else 1))
+                elif row["plus"].clicked(pos):
+                    self.minutes[k] = min(240, self.minutes[k] + (5 if self.minutes[k] >= 5 else 1))
+            secs = JACKPOT_SECONDS if k == "jackpot" else self.minutes[k] * 60
+            if row["start"].clicked(pos, not busy):
+                ev.owner_action("casino_owner_event", {"which": k, "seconds": secs},
+                                f"{EVENT_NAMES[k]} STARTED FOR EVERYONE")
+            elif row["stop"].clicked(pos, not busy):
+                ev.owner_action("casino_owner_event", {"which": k, "seconds": 0}, f"{EVENT_NAMES[k]} STOPPED")
+        for b, s in self.scope_btns:
+            if b.clicked(pos):
+                self.scope = s
+        for b, t in self.theme_btns:
+            if b.clicked(pos, not busy or self.scope == "me"):
+                if self.scope == "me":
+                    app.theme_mine = t or "none"
+                    app.save()
+                    ev.owner_msg = f"THEME FOR YOU ONLY: {THEME_NAMES[t]}"
+                else:
+                    app.theme_mine = ""
+                    app.save()
+                    ev.owner_action("casino_owner_theme", {"new_theme": t}, f"THEME FOR EVERYONE: {THEME_NAMES[t]}")
+
+    def set_money(self):
+        if self.money_text:
+            self.app.balance = min(10 ** 15, int(self.money_text))
+            self.app.save()
+            self.app.events.owner_msg = f"YOUR CHIPS SET TO {money(self.app.balance)}"
+            self.money_text = ""
+        self.editing = False
+
+    def draw(self, surf):
+        app, ev = self.app, self.app.events
+        mouse = pygame.mouse.get_pos()
+        dim = pygame.Surface((W, H), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 170))
+        surf.blit(dim, (0, 0))
+        P = self.PANEL
+        pygame.draw.rect(surf, (18, 12, 22), P, border_radius=18)
+        pygame.draw.rect(surf, GOLD, P, width=3, border_radius=18)
+        draw_text(surf, "OWNER MENU", font(28, bold=True, serif=True), GOLD, (P.x + 40, P.y + 36), anchor="midleft")
+        draw_text(surf, f"{app.session.name}  -  events and themes reach every player within ~15 seconds",
+                  font(13), (190, 180, 200), (P.x + 40, P.y + 64), anchor="midleft")
+        self.btn_close.draw(surf, mouse)
+        # money
+        draw_text(surf, "MY CHIPS", font(16, bold=True), GOLD, (P.x + 40, P.y + 86), anchor="midleft")
+        pygame.draw.rect(surf, (6, 6, 12), self.money_box, border_radius=10)
+        pygame.draw.rect(surf, GOLD if self.editing else (100, 90, 120), self.money_box, width=2, border_radius=10)
+        shown = self.money_text + ("|" if self.editing and int(time.time() * 2) % 2 == 0 else "")
+        draw_text(surf, shown or f"now {money(app.balance)}", font(20, bold=True), WHITE if shown else (140, 140, 160),
+                  (self.money_box.x + 14, self.money_box.centery), anchor="midleft")
+        self.btn_set.draw(surf, mouse, bool(self.money_text))
+        for b, _ in self.btn_quick:
+            b.draw(surf, mouse)
+        # events
+        draw_text(surf, "EVENTS  (FOR EVERYONE)", font(16, bold=True), GOLD, (P.x + 40, P.y + 200), anchor="midleft")
+        busy = bool(ev.owner_flow)
+        for k, row in self.rows.items():
+            y = row["y"]
+            on = ev.active(k)
+            draw_text(surf, EVENT_NAMES[k], font(18, bold=True), WHITE, (P.x + 40, y + 16), anchor="midleft")
+            left = int(ev.left(k))
+            draw_text(surf, f"ON  {left // 60}:{left % 60:02d}" if on else "off", font(13, bold=True),
+                      (120, 240, 140) if on else (150, 140, 160), (P.x + 40, y + 38), anchor="midleft")
+            if k in self.minutes:
+                row["minus"].draw(surf, mouse)
+                row["plus"].draw(surf, mouse)
+                draw_text(surf, f"{self.minutes[k]} MIN", font(18, bold=True), WHITE, (P.x + 422, y + 24))
+            else:
+                draw_text(surf, "3:03 + SONG", font(16, bold=True), GOLD, (P.x + 422, y + 24))
+            row["start"].draw(surf, mouse, not busy)
+            row["stop"].draw(surf, mouse, not busy and on)
+        # themes
+        draw_text(surf, "THEME", font(16, bold=True), GOLD, (P.x + 40, P.y + 450), anchor="midleft")
+        mine = app.theme_mine
+        now = f"everyone: {THEME_NAMES.get(ev.theme, 'NONE')}" + (f"   |   just you: {THEME_NAMES.get('' if mine == 'none' else mine, 'NONE')}"
+                                                                   if mine else "")
+        draw_text(surf, now, font(13), (190, 180, 200), (P.x + 120, P.y + 450), anchor="midleft")
+        for b, s in self.scope_btns:
+            b.color = (200, 150, 30) if s == self.scope else (40, 60, 110)
+            b.draw(surf, mouse)
+        current = app.themefx.current()
+        for b, t in self.theme_btns:
+            b.color = (200, 150, 30) if t == current else (70, 60, 100)
+            b.draw(surf, mouse, not busy or self.scope == "me")
+        if ev.owner_msg:
+            bad = "ONLY" in ev.owner_msg or "FAILED" in ev.owner_msg or "CAN'T" in ev.owner_msg or "ISN'T" in ev.owner_msg
+            draw_text(surf, ev.owner_msg, font(15, bold=True), (240, 130, 130) if bad else (140, 230, 160),
+                      (P.centerx, P.bottom - 24))
+
+
+# --------------------------------------------------------------------------
 # Lobby / menu
 # --------------------------------------------------------------------------
 def art_blackjack(assets, w, h):
@@ -16860,11 +17367,15 @@ class App:
             self.cloud_wait = 0.0
             self.cloud_state = ""
             self.cloud_retry_data = None
+            self.events = LiveEvents(self)
+            self.themefx = ThemeFX(self)
+            self.owner_menu = OwnerMenu(self)
             self.remembered = remember_load()
             if self.remembered:           # "keep me logged in": log back in while the title plays
                 self.start_account_flow("resume", flow_resume(self.remembered))
         if self.session:
             self.player_name = self.session.name
+        self.theme_mine = str(self.saved.get("theme_mine", ""))    # the owner's "just me" theme
 
     # ---- persistence -----------------------------------------------------
     @staticmethod
@@ -16927,6 +17438,7 @@ class App:
                            "lottery": self.lottery.to_state() if hasattr(self, "lottery") else {},
                            "name": getattr(self, "player_name", "Player"),
                            "sound": getattr(self, "sound_on", True),
+                           "theme_mine": getattr(self, "theme_mine", ""),
                            "pusher": self.scenes["pusher"].to_state() if hasattr(self, "scenes") else
                            self.saved.get("pusher", {})})
 
@@ -17076,6 +17588,11 @@ class App:
 
     # ---- stats, achievements, daily bonus --------------------------------
     def record(self, game, stake, returned):
+        ev = getattr(self, "events", None)
+        if ev and ev.active("double") and returned > stake and game not in ("stocks", "work"):
+            self.balance += returned                   # DOUBLE PAYOUTS: the win is paid a second time
+            self.float_text(f"+{money(returned)} DOUBLE!", (255, 220, 90))
+            returned *= 2
         st = self.stats.setdefault(game, {"rounds": 0, "wins": 0, "wagered": 0, "returned": 0, "best": 0})
         st["rounds"] += 1
         st["wagered"] += stake
@@ -17510,7 +18027,16 @@ class App:
                 if self.help.active:
                     self.help.handle(e)
                     continue
+                if self.owner_menu.active:
+                    self.owner_menu.handle(e)
+                    continue
                 if self.chat_handle(e):
+                    continue
+                if (e.type == pygame.KEYDOWN and e.key == pygame.K_BACKQUOTE and self.owner_menu.allowed()
+                        and not self.typing_elsewhere()):
+                    self.owner_menu.toggle()
+                    continue
+                if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and self.events.rain and self.events.grab(e.pos):
                     continue
                 if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and CHIP_WIN.visible():
                     hit = [d for r, d in zip(CHIP_WIN.arrows(), (-1, 1)) if r.collidepoint(e.pos)]
@@ -17556,6 +18082,10 @@ class App:
 
             self.market.update(dt)
             self.account_tick(dt)
+            self.events.tick(dt)
+            self.themefx.update(dt)
+            if self.owner_menu.active and not self.owner_menu.allowed():
+                self.owner_menu.active = False
             if self.net_server:
                 self.net_server.update(dt)
             if self.net and not self.net.update(dt):
@@ -17625,8 +18155,10 @@ class App:
                     draw_text(self.screen, line, font(13, bold=True), (255, 255, 0), (8, 70 + i * 16), anchor="topleft",
                               shadow=(0, 0, 0))
             self.draw_chip_arrows(self.screen)
+            self.themefx.draw(self.screen, self.scene)
             self.draw_others(self.screen)
             self.draw_chat(self.screen)
+            self.events.draw(self.screen)
             for f in self.floaters:
                 f["y"] += 28 * dt
                 f["life"] -= dt
@@ -17640,6 +18172,8 @@ class App:
                 self.help.draw(self.screen)
             if self.profile.active:
                 self.profile.draw(self.screen)
+            if self.owner_menu.active:
+                self.owner_menu.draw(self.screen)
             pygame.display.flip()
 
 

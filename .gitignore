@@ -17,3 +17,6 @@ icon.ico
 casino.html
 *_backup.py
 __pycache__/
+
+# Music source files (the builds carry a compressed copy)
+music/

@@ -190,6 +190,10 @@ def main():
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed", "--distpath", dist,
            "--name", os.path.splitext(ASSET)[0], "--icon", ICON,
            "--hidden-import", "updater", "--hidden-import", "version", ENTRY]
+    import build_web
+    music = build_web.make_music()
+    if music:                                  # the Jackpot song, packed inside the .exe
+        cmd[-1:-1] = ["--add-data", music + os.pathsep + "music"]
     print(" ".join(cmd))
     if subprocess.call(cmd) != 0:
         sys.exit("PyInstaller failed")
