@@ -184,15 +184,17 @@ def main():
             bump_version("patch")
 
     write_icon()
-    # Build into "release" rather than "dist": if you're playing dist\GrandRoyale.exe, Windows won't let it be overwritten
-    cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed", "--distpath", "release",
+    # Each version builds into its own folder (release1.2.3), so a copy of the game you're still playing can
+    # never block the next build
+    dist = os.path.join("release", "v" + VERSION)
+    cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed", "--distpath", dist,
            "--name", os.path.splitext(ASSET)[0], "--icon", ICON,
            "--hidden-import", "updater", "--hidden-import", "version", ENTRY]
     print(" ".join(cmd))
     if subprocess.call(cmd) != 0:
         sys.exit("PyInstaller failed")
     shutil.rmtree(os.path.join(HERE, "build"), ignore_errors=True)
-    out = os.path.join(HERE, "release", ASSET)
+    out = os.path.join(HERE, dist, ASSET)
     if not os.path.exists(out):
         sys.exit("build reported success but %s is missing" % out)
     print("\nbuilt %s  (%.1f MB)" % (out, os.path.getsize(out) / 1e6))
