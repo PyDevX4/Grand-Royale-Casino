@@ -34,7 +34,7 @@ ICON = "icon.ico"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # What changed - shown on the GitHub release page. Edit before publishing if you like.
-NOTES = "New game: COIN FLIP (in the TABLE & DICE tab) - call heads or tails and double your bet. The game installs this update by itself the next time you open it."
+NOTES = "Coin Flip: call the EDGE for 20x, and DOUBLE OR NOTHING after every win. The game installs this update by itself the next time you open it."
 DOWNLOAD_NOTE = "\n".join([
     "---",
     "**To play: download the .zip below.** Unzip it and run \"Grand Royale Casino.exe\" inside.",

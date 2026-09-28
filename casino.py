@@ -14074,7 +14074,8 @@ def art_pusher(w, h):
 # --------------------------------------------------------------------------
 # Coin Flip - heads or tails, double your bet
 # --------------------------------------------------------------------------
-FLIP_EDGE = 0.02                 # once in a while the coin lands on its edge - the house wins that one
+FLIP_EDGE = 0.045                # the coin lands standing on its edge about 1 flip in 22...
+FLIP_EDGE_PAY = 20               # ...and calling the edge pays 20x
 FLIP_TIME = 1.7
 FLIP_R = 90                      # coin radius
 FLIP_Y = 380                     # where the coin lands
@@ -14123,31 +14124,48 @@ class CoinFlip(StakeGame):
         super().__init__(app, ((22, 13, 8), (90, 60, 35)))
         self.bg = felt_table((12, 60, 34), (28, 105, 60))
         self.faces = {k: make_coin_face(k, FLIP_R) for k in ("heads", "tails")}
-        self.state = "betting"          # betting, flipping, result
+        self.state = "betting"          # betting, flipping, won (collect or double), result
         self.pick = None
         self.result = None
-        self.stake = 0
+        self.stake = 0                  # riding on the flip in the air
+        self.run_stake = 0              # the chips you first put in this run
+        self.pot = 0                    # what you've won so far, waiting to be collected or risked
+        self.doubles = 0                # how many times you've let it ride
         self.t = 0.0
         self.flip_t = 0.0
         self.end_angle = 0.0
         self.history = deque(maxlen=16)
         self.streak = 0
-        self.message = "SET YOUR BET, THEN CALL IT: HEADS OR TAILS"
-        self.btn_heads = Button((965, 646, 130, 62), "HEADS", (190, 140, 30), 22, "H")
-        self.btn_tails = Button((1105, 646, 130, 62), "TAILS", (80, 95, 130), 22, "T")
+        self.message = "SET YOUR BET, THEN CALL IT: HEADS, TAILS - OR THE EDGE"
+        self.btn_heads = Button((965, 646, 86, 62), "HEADS", (190, 140, 30), 17, "H  x2")
+        self.btn_tails = Button((1057, 646, 86, 62), "TAILS", (80, 95, 130), 17, "T  x2")
+        self.btn_edge = Button((1149, 646, 86, 62), "EDGE", (150, 40, 90), 17, f"E  x{FLIP_EDGE_PAY}")
+        self.btn_collect = Button((W / 2 - 150, 452, 300, 62), "COLLECT", (25, 120, 60), 24, "C")
 
     def busy(self):
         return self.state == "flipping"
 
+    def can_leave(self):
+        return self.state != "flipping"
+
     def outstanding_bets(self):
-        return self.stake if self.state == "flipping" else 0
+        return self.stake if self.state == "flipping" else (self.pot if self.state == "won" else 0)
+
+    def leave(self):
+        if self.state == "won":                         # walking away collects your winnings
+            self.collect()
 
     def flip(self, side):
         if self.busy():
             return
-        stake = self.take_bet()
-        if not stake:
-            return
+        if self.state == "won":                         # double (or nothing) - let the whole win ride
+            stake, self.pot = self.pot, 0
+            self.doubles += 1
+        else:
+            stake = self.take_bet()
+            if not stake:
+                return
+            self.run_stake, self.doubles = stake, 0
         self.stake, self.pick = stake, side
         r = random.random()
         self.result = "edge" if r < FLIP_EDGE else ("heads" if r < FLIP_EDGE + (1 - FLIP_EDGE) / 2 else "tails")
@@ -14157,38 +14175,65 @@ class CoinFlip(StakeGame):
         self.end_angle = turns * math.pi + (math.pi / 2 if self.result == "edge" else 0)
         self.state = "flipping"
         self.flip_t = 0.0
-        self.message = f"YOU CALLED {side.upper()}..."
+        self.message = (f"LETTING {money(stake)} RIDE ON {side.upper()}..." if self.doubles
+                        else f"YOU CALLED {side.upper()}...")
         self.app.sfx("chip")
 
+    def payout(self, side):
+        return FLIP_EDGE_PAY if side == "edge" else 2
+
     def settle(self):
-        self.state = "result"
         self.history.append(self.result)
         if self.result == self.pick:
             self.streak += 1
-            self.finish(self.stake, self.stake * 2, f"{self.result.upper()}!  YOU WIN {money(self.stake * 2)}")
-            self.app.effects.burst(W / 2, FLIP_Y - 40, 40, [(255, 220, 90), (255, 255, 255)])
+            self.pot = self.stake * self.payout(self.pick)
+            self.stake = 0
+            self.state = "won"
+            self.app.sfx("win")
+            self.app.effects.burst(W / 2, FLIP_Y - 40, 60 if self.pick == "edge" else 36,
+                                   [(255, 220, 90), (255, 255, 255)])
+            what = "ON ITS EDGE!" if self.result == "edge" else f"{self.result.upper()}!"
+            self.message = f"{what}  YOU'VE WON {money(self.pot)}  -  COLLECT, OR DOUBLE OR NOTHING?"
         else:
             self.streak = 0
-            lose = ("IT LANDED ON ITS EDGE!  THE HOUSE WINS" if self.result == "edge"
-                    else f"{self.result.upper()}  -  YOU LOSE {money(self.stake)}")
-            self.finish(self.stake, 0, lose_msg=lose)
-        self.stake = 0
+            lost = self.stake
+            self.stake = 0
+            self.state = "result"
+            if self.result == "edge":
+                why = "IT LANDED ON ITS EDGE!"
+            else:
+                why = f"{self.result.upper()}."
+            tail = f"YOU LOSE {money(lost)}" if not self.doubles else f"THE {money(lost)} YOU LET RIDE IS GONE"
+            self.finish(self.run_stake, 0, lose_msg=f"{why}  {tail}")
+
+    def collect(self):
+        if self.state != "won":
+            return
+        won, self.pot = self.pot, 0
+        self.state = "result"
+        extra = f" AFTER {self.doubles} DOUBLE{'S' if self.doubles != 1 else ''}" if self.doubles else ""
+        self.finish(self.run_stake, won, f"COLLECTED {money(won)}{extra}!")
 
     def handle(self, e):
+        keys = {pygame.K_h: "heads", pygame.K_t: "tails", pygame.K_e: "edge"}
         if e.type == pygame.KEYDOWN:
-            if e.key == pygame.K_h:
-                self.flip("heads")
-            elif e.key == pygame.K_t:
-                self.flip("tails")
+            if e.key in keys:
+                self.flip(keys[e.key])
+            elif e.key in (pygame.K_c, pygame.K_RETURN) and self.state == "won":
+                self.collect()
         elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-            if self.chip_click(e.pos):
+            if self.state == "won":
+                if self.btn_collect.clicked(e.pos):
+                    self.collect()
+                    return
+            elif self.chip_click(e.pos):
                 return
-            if self.btn_clear.clicked(e.pos):
+            if self.btn_clear.clicked(e.pos, self.state != "won"):
                 self.bet = 0
-            elif self.btn_heads.clicked(e.pos, not self.busy()):
-                self.flip("heads")
-            elif self.btn_tails.clicked(e.pos, not self.busy()):
-                self.flip("tails")
+            for b, side in ((self.btn_heads, "heads"), (self.btn_tails, "tails"), (self.btn_edge, "edge")):
+                if b.clicked(e.pos, not self.busy()):
+                    self.flip(side)
+                    return
 
     def update(self, dt):
         self.t += dt
@@ -14213,7 +14258,6 @@ class CoinFlip(StakeGame):
     def draw_coin(self, surf):
         height, ang = self.coin_pose()
         x, y = W / 2, FLIP_Y - height
-        # shadow on the table
         sh = max(0.35, 1 - height / 400)
         shadow = pygame.Surface((int(2 * FLIP_R * sh) + 4, int(40 * sh) + 4), pygame.SRCALPHA)
         pygame.draw.ellipse(shadow, (0, 0, 0, int(110 * sh)), shadow.get_rect())
@@ -14239,41 +14283,74 @@ class CoinFlip(StakeGame):
         mouse = pygame.mouse.get_pos()
         surf.blit(self.bg, (0, 0))
         draw_text(surf, "COIN FLIP", font(40, bold=True, serif=True), GOLD, (W / 2, 104), shadow=(0, 0, 0))
-        draw_text(surf, "CALL IT RIGHT AND DOUBLE YOUR BET", font(16, bold=True), (200, 225, 205), (W / 2, 142))
+        draw_text(surf, f"HEADS OR TAILS PAYS x2   -   THE EDGE PAYS x{FLIP_EDGE_PAY}", font(16, bold=True),
+                  (200, 225, 205), (W / 2, 142))
         self.draw_coin(surf)
         # your call and the payout
-        left = pygame.Rect(40, 170, 250, 200)
+        left = pygame.Rect(40, 170, 250, 220)
         soft_panel(surf, left, 150, (90, 140, 100))
         draw_text(surf, "YOUR CALL", font(15, bold=True), GOLD, (left.centerx, left.y + 26))
         call = self.pick.upper() if self.pick and self.state != "betting" else "-"
-        draw_text(surf, call, font(34, bold=True), WHITE, (left.centerx, left.y + 72))
-        draw_text(surf, f"BET {money(self.stake or self.bet)}", font(16, bold=True), (200, 200, 210),
-                  (left.centerx, left.y + 118))
-        draw_text(surf, f"WIN PAYS {money(2 * (self.stake or self.bet))}", font(16, bold=True), (120, 230, 140),
-                  (left.centerx, left.y + 146))
-        draw_text(surf, f"STREAK: {self.streak}", font(14, bold=True), GOLD if self.streak else (160, 160, 170),
-                  (left.centerx, left.y + 178))
+        draw_text(surf, call, font(34, bold=True), WHITE, (left.centerx, left.y + 70))
+        if self.state == "won":
+            draw_text(surf, f"WON SO FAR {money(self.pot)}", font(16, bold=True), (120, 230, 140),
+                      (left.centerx, left.y + 116))
+            draw_text(surf, f"double it: {money(self.pot * 2)}", font(14), (200, 200, 210), (left.centerx, left.y + 142))
+            draw_text(surf, f"edge: {money(self.pot * FLIP_EDGE_PAY)}", font(14), (230, 150, 200),
+                      (left.centerx, left.y + 164))
+        else:
+            amt = self.stake or self.bet
+            draw_text(surf, f"BET {money(amt)}", font(16, bold=True), (200, 200, 210), (left.centerx, left.y + 116))
+            draw_text(surf, f"x2 pays {money(amt * 2)}", font(14), (120, 230, 140), (left.centerx, left.y + 142))
+            draw_text(surf, f"edge pays {money(amt * FLIP_EDGE_PAY)}", font(14), (230, 150, 200),
+                      (left.centerx, left.y + 164))
+        label = f"DOUBLES: {self.doubles}" if self.state in ("won", "flipping") and self.doubles else f"STREAK: {self.streak}"
+        draw_text(surf, label, font(14, bold=True), GOLD if self.streak or self.doubles else (160, 160, 170),
+                  (left.centerx, left.y + 196))
         # history
-        right = pygame.Rect(W - 290, 170, 250, 200)
+        right = pygame.Rect(W - 290, 170, 250, 220)
         soft_panel(surf, right, 150, (90, 140, 100))
         draw_text(surf, "LAST FLIPS", font(15, bold=True), GOLD, (right.centerx, right.y + 26))
         for i, res in enumerate(reversed(self.history)):
             cx = right.x + 34 + (i % 6) * 36
             cy = right.y + 66 + (i // 6) * 40
-            col = (235, 185, 50) if res == "heads" else ((150, 160, 190) if res == "tails" else (230, 80, 80))
+            col = (235, 185, 50) if res == "heads" else ((150, 160, 190) if res == "tails" else (230, 80, 160))
             pygame.draw.circle(surf, col, (cx, cy), 15)
             draw_text(surf, {"heads": "H", "tails": "T", "edge": "E"}[res], font(14, bold=True), (40, 30, 10), (cx, cy))
         if not self.history:
             draw_text(surf, "No flips yet", font(14), (170, 180, 170), (right.centerx, right.y + 90))
-        if self.state == "result":
+        # double or nothing
+        if self.state == "won":
+            box = pygame.Rect(0, 0, 600, 124)
+            box.midbottom = (W / 2, 614)
+            soft_panel(surf, box, 215, GOLD)
+            draw_text(surf, f"YOU'VE WON {money(self.pot)}!", font(24, bold=True), (120, 240, 140), (W / 2, box.y + 22))
+            self.btn_collect.text = f"COLLECT {money(self.pot)}"
+            self.btn_collect.rect.size = (280, 52)
+            self.btn_collect.rect.center = (W / 2, box.y + 66)
+            self.btn_collect.draw(surf, mouse)
+            draw_text(surf, "...or DOUBLE OR NOTHING: call HEADS or TAILS (or the EDGE for x20) below",
+                      font(13, bold=True), (240, 220, 160), (W / 2, box.bottom - 18))
+        elif self.state == "result":
             big = {"heads": "HEADS!", "tails": "TAILS!", "edge": "ON ITS EDGE!"}[self.result]
-            won = self.result == self.pick
+            won = self.pot == 0 and self.message.startswith("COLLECTED")
             draw_pill(surf, big, font(34, bold=True), (W / 2, 548), (120, 240, 140) if won else (250, 140, 140),
                       (0, 0, 0, 200), GOLD if won else (150, 60, 60), pad=(24, 6))
-        if self.message:
-            draw_pill(surf, self.message, font(16, bold=True), (640, 604), GOLD, (0, 0, 0, 210), GOLD_DARK, pad=(14, 4))
-        self.draw_bottom(surf, mouse, self.btn_heads, not self.busy() and 0 < self.bet <= self.app.balance)
-        self.btn_tails.draw(surf, mouse, not self.busy() and 0 < self.bet <= self.app.balance)
+        if self.message and self.state != "won":
+            draw_pill(surf, self.message, font(15, bold=True), (640, 604), GOLD, (0, 0, 0, 210), GOLD_DARK, pad=(14, 4))
+        riding = self.state == "won"
+        ok = not self.busy() and (riding or 0 < self.bet <= self.app.balance)
+        for b, side in ((self.btn_heads, "heads"), (self.btn_tails, "tails"), (self.btn_edge, "edge")):
+            b.text = side.upper() if not riding else ("DOUBLE" if side != "edge" else "x20")
+            b.hint = (f"{side[0].upper()}  x{self.payout(side)}" if not riding else
+                      f"ON {side.upper()}")
+        bottom_bar(surf, (10, 8, 12))
+        self.tray.draw(surf, self.assets, mouse, dim=lambda v: self.bet + v > self.app.balance,
+                       disabled=self.busy() or riding)
+        self.btn_clear.hint = f"BET {money(self.bet)}"
+        self.btn_clear.draw(surf, mouse, self.bet > 0 and not self.busy() and not riding)
+        for b in (self.btn_heads, self.btn_tails, self.btn_edge):
+            b.draw(surf, mouse, ok)
         self.app.draw_top_bar(surf, "COIN FLIP", lobby=True, lobby_enabled=self.can_leave())
 
 
@@ -14761,7 +14838,7 @@ GAME_INFO = {       # scene -> (title, one-line description)
     "sicbo": ("SIC BO", "Three dice and dozens of ways to bet."),
     "wheel": ("WHEEL", "Spin for a multiplier from x0.1 to x5."),
     "cups": ("CUPS", "Follow the ball as the cups get shuffled."),
-    "coinflip": ("COIN FLIP", "Heads or tails. Call it right and double your bet."),
+    "coinflip": ("COIN FLIP", "Heads or tails pays 2x. The edge pays 20x. Then double or nothing!"),
     "pusher": ("CHIP PUSHER", "Drop chips, push them over the edge. Just like the arcade!"),
     "slots": ("SLOTS", "Line up the symbols on 5 paylines."),
     "rocket": ("ROCKET", "Cash out before the rocket explodes!"),
@@ -15784,14 +15861,18 @@ HELP = {
               "multiplayer table.)"),
     ]),
     "coinflip": ("COIN FLIP", [
-        ("h", "The simplest game in the casino"),
+        ("h", "Call it"),
         ("b", "Click chips to set your bet."),
-        ("b", "Press HEADS (H key) or TAILS (T key) - the coin flips right away."),
-        ("b", "Call it right and you get double your bet back."),
-        ("x", "Bet $100 on HEADS, it lands HEADS  ->  you get $200."),
-        ("h", "Watch out"),
-        ("p", "Once in a while (2 flips in 100) the coin lands standing on its edge. Nobody called that, so the "
-              "house wins those."),
+        ("b", "Press HEADS (H) or TAILS (T) - call it right and you get 2x your bet."),
+        ("b", "Or call the EDGE (E) - the coin landing standing up on its skinny side. It only happens about 1 flip "
+              "in 22, but it pays 20x!"),
+        ("x", "Bet $100 on HEADS, it lands HEADS  ->  you've won $200."),
+        ("h", "Double or nothing"),
+        ("p", "After a win you can COLLECT (C) your winnings - or let them ride on another flip. Call it right and "
+              "your win doubles (or goes 20x on the edge). Call it wrong and you lose the lot."),
+        ("x", "$100 -> win $200 -> double $400 -> double $800 -> collect $800."),
+        ("b", "If you call heads or tails and it lands on the edge, you lose."),
+        ("b", "Leaving the table collects whatever you've won."),
     ]),
     "pusher": ("CHIP PUSHER", [
         ("h", "Just like the arcade"),
