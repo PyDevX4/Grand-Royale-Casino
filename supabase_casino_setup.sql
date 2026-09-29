@@ -150,3 +150,51 @@ end;
 $$;
 revoke execute on function public.casino_owner_theme(text) from anon, public;
 grant execute on function public.casino_owner_theme(text) to authenticated;
+
+-- ============================================================================================================
+-- The owner menu's PLAYERS tab: see every player's chips and set them. Only is_owner accounts can use these.
+-- The player's game picks up the new number within about 30 seconds (or the next time they log in).
+-- ============================================================================================================
+create or replace function public.casino_owner_players()
+returns table (username text, balance bigint, updated_at timestamptz)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.casino_is_owner() then
+    raise exception 'only the owner can do that';
+  end if;
+  return query
+    select p.username, p.balance, p.updated_at from public.casino_players p
+    order by p.updated_at desc limit 300;
+end;
+$$;
+revoke execute on function public.casino_owner_players() from anon, public;
+grant execute on function public.casino_owner_players() to authenticated;
+
+create or replace function public.casino_owner_set_balance(player text, amount bigint)
+returns bigint
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  n int;
+begin
+  if not public.casino_is_owner() then
+    raise exception 'only the owner can do that';
+  end if;
+  if amount is null or amount < 0 or amount > 1000000000000000 then
+    raise exception 'that amount is not allowed';
+  end if;
+  update public.casino_players set balance = amount, updated_at = now() where lower(username) = lower(player);
+  get diagnostics n = row_count;
+  if n = 0 then
+    raise exception 'there is no player called %', player;
+  end if;
+  return amount;
+end;
+$$;
+revoke execute on function public.casino_owner_set_balance(text, bigint) from anon, public;
+grant execute on function public.casino_owner_set_balance(text, bigint) to authenticated;

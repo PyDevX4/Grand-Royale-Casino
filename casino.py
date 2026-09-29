@@ -10627,8 +10627,10 @@ class Crossy(StakeGame):
         top = cy - CR_T / 2
         kind = row["kind"]
         if kind == "grass":
-            grass = {"winter": ((232, 240, 250), (220, 232, 245)), "halloween": ((74, 110, 58), (66, 100, 52)),
-                     "easter": ((130, 210, 110), (120, 200, 100)), "summer": ((236, 214, 150), (226, 204, 140))
+            grass = {"winter": ((232, 240, 250), (220, 232, 245)), "christmas": ((232, 240, 250), (220, 232, 245)),
+                     "halloween": ((74, 110, 58), (66, 100, 52)), "easter": ((130, 210, 110), (120, 200, 100)),
+                     "summer": ((236, 214, 150), (226, 204, 140)), "fall": ((176, 140, 70), (166, 130, 62)),
+                     "stpatricks": ((90, 190, 80), (80, 180, 72)), "spring": ((140, 215, 120), (130, 205, 110))
                      }.get(CURRENT_THEME, ((104, 186, 76), (96, 176, 70)))
             pygame.draw.rect(surf, grass[0] if r % 2 else grass[1], (0, top, W, CR_T + 1))
             for c in (0, CR_COLS - 1):
@@ -10638,7 +10640,7 @@ class Crossy(StakeGame):
                 pygame.draw.ellipse(surf, (60, 110, 45), (x - 24, cy + 6, 48, 18))
                 pygame.draw.rect(surf, (110, 70, 40), (x - 6, cy - 2, 12, 22), border_radius=3)
                 pygame.draw.rect(surf, (40, 130, 60), (x - 22, cy - 30, 44, 36), border_radius=12)
-                if CURRENT_THEME == "winter":
+                if CURRENT_THEME in ("winter", "christmas"):
                     pygame.draw.rect(surf, (245, 250, 255), (x - 20, cy - 30, 40, 12), border_radius=8)
                 pygame.draw.rect(surf, (70, 165, 85), (x - 16, cy - 26, 26, 16), border_radius=8)
         elif kind == "road":
@@ -10686,8 +10688,9 @@ class Crossy(StakeGame):
 
     def draw(self, surf):
         mouse = pygame.mouse.get_pos()
-        surf.fill({"winter": (220, 232, 245), "halloween": (66, 100, 52), "easter": (120, 200, 100),
-                   "summer": (226, 204, 140)}.get(CURRENT_THEME, (96, 176, 70)))
+        surf.fill({"winter": (220, 232, 245), "christmas": (220, 232, 245), "halloween": (66, 100, 52),
+                   "easter": (120, 200, 100), "summer": (226, 204, 140), "fall": (166, 130, 62),
+                   "stpatricks": (80, 180, 72), "spring": (130, 205, 110)}.get(CURRENT_THEME, (96, 176, 70)))
         surf.set_clip(pygame.Rect(0, 56, W, 574))
         lo = max(0, int(self.cam) - 2)
         hi = min(len(self.rows), int(self.cam) + 10)
@@ -12289,6 +12292,7 @@ class NetServer:
                 if not room:
                     raise
         self.relay = RelayHub(room) if room else None      # friends anywhere come in through the room code
+        self.banned = set()                   # names the host kicked out (they can't come back this game)
         self.name = host_name
         self.clients = {}
         self.next_id = 1
@@ -12375,6 +12379,9 @@ class NetServer:
         t = str(m.get("t", ""))
         if t == "hello":
             name = clean_name(m.get("name"))
+            if name.lower() in self.banned:
+                self.kick(pid)
+                return
             taken = {o["name"] for p, o in self.clients.items() if p != pid}
             base, k = name, 2
             while name in taken:
@@ -12408,6 +12415,17 @@ class NetServer:
             self.bj.on_msg(pid, c, m)
         elif t.split("_")[0] in self.party:
             self.party[t.split("_")[0]].on_msg(pid, c, m)
+
+    def kick(self, pid):
+        """The host removed this player. They're told, and they can't rejoin with the same name."""
+        c = self.clients.get(pid)
+        if not c or pid == min(self.clients):          # (the host can't kick themselves)
+            return ""
+        self.banned.add(c["name"].lower())
+        c["link"].send({"t": "kicked"})
+        c["link"].flush()
+        c["link"].close()                              # dropped on the next update, like any lost connection
+        return c["name"]
 
     def drop(self, pid):
         self.poker.stand(pid, gone=True)
@@ -12443,6 +12461,7 @@ class NetClient:
         self.addr = addr
         self.link = link or NetLink(socket.create_connection((addr, NET_PORT), timeout=3))
         self.room = link.code if isinstance(link, RelayClientLink) else ""
+        self.why = ""                 # why we got disconnected, when the host said
         self.id = None
         self.name = name
         self.host_name = ""
@@ -12483,6 +12502,9 @@ class NetClient:
                                   f"The host has v{host_ver}, you have v{VERSION} - some things may not work")
         elif t == "full":
             app.effects.toast("LOBBY IS FULL", f"Only {NET_MAX_PLAYERS} players can join one game")
+        elif t == "kicked":
+            self.why = "The host removed you from the game"
+            self.link.close()
         elif t == "roster":
             self.host_name = m.get("host", self.host_name)
             old = set(self.players)
@@ -13071,6 +13093,7 @@ class Online:
         self.btn_join_addr = Button((1030, 530, 160, 52), "JOIN", (40, 90, 160), 22)
         self.btn_leave = Button((90, 560, 440, 60), "LEAVE", (150, 35, 40), 24)
         self.join_btns = []
+        self.kick_btns = []
 
     def can_leave(self):
         return True
@@ -13154,6 +13177,11 @@ class Online:
             if app.net:
                 if self.btn_leave.clicked(e.pos):
                     app.leave_game()
+                for pid, b in self.kick_btns:
+                    if app.net_server and b.clicked(e.pos):
+                        name = app.net_server.kick(pid)
+                        if name:
+                            app.effects.toast("PLAYER REMOVED", f"{name} was kicked and can't rejoin this game")
                 return
             if self.name_box.collidepoint(e.pos):
                 self.focus = "name"
@@ -13269,6 +13297,7 @@ class Online:
             soft_panel(surf, right, 150, (90, 110, 190))
             draw_text(surf, f"PLAYERS IN THIS GAME  ({len(net.players)}/{NET_MAX_PLAYERS})", font(20, bold=True), GOLD,
                       (right.centerx, 116))
+            self.kick_btns = []
             for k, (pid, p) in enumerate(sorted(net.players.items())):
                 y = 160 + k * 56
                 row = pygame.Rect(right.x + 24, y, right.w - 48, 48)
@@ -13283,6 +13312,10 @@ class Online:
                           anchor="midleft")
                 draw_text(surf, money(p["balance"]), font(18, bold=True), (120, 230, 140), (row.right - 16, row.centery),
                           anchor="midright")
+                if app.net_server and not me:
+                    b = Button((row.right - 250, row.y + 8, 84, 32), "KICK", (150, 35, 40), 15)
+                    b.draw(surf, mouse)
+                    self.kick_btns.append((pid, b))
             if len(net.players) < 2 and net.id is not None:
                 draw_text(surf, "Waiting for friends to join...", font(16), (170, 180, 210), (right.centerx, 600))
         else:
@@ -15192,17 +15225,26 @@ JACKPOT_CHANCE = 0.015           # during Jackpot, this share of slot spins land
 EVENT_POLL = 15.0                # seconds between checks for the owner's switches
 RAIN_VALUES = [10, 25, 50, 100, 250, 500, 1000]
 RAIN_WEIGHTS = [30, 25, 18, 12, 8, 5, 2]
-THEMES = ["halloween", "winter", "valentines", "easter", "summer"]
-THEME_NAMES = {"halloween": "HALLOWEEN", "winter": "WINTER", "valentines": "VALENTINE'S", "easter": "EASTER",
-               "summer": "SUMMER", "": "NONE"}
-THEME_GREETING = {"halloween": "HAPPY HALLOWEEN!", "winter": "HAPPY HOLIDAYS!", "valentines": "HAPPY VALENTINE'S DAY!",
-                  "easter": "HAPPY EASTER!", "summer": "SUMMER VIBES!"}
+THEMES = ["halloween", "fall", "christmas", "winter", "valentines", "stpatricks", "spring", "easter", "summer",
+          "anniversary"]
+THEME_NAMES = {"halloween": "HALLOWEEN", "fall": "FALL", "christmas": "CHRISTMAS", "winter": "WINTER",
+               "valentines": "VALENTINE'S", "stpatricks": "ST. PATRICK'S", "spring": "SPRING", "easter": "EASTER",
+               "summer": "SUMMER", "anniversary": "ANNIVERSARY", "": "NONE"}
+THEME_GREETING = {"halloween": "HAPPY HALLOWEEN!", "fall": "HAPPY FALL!", "christmas": "MERRY CHRISTMAS!",
+                  "winter": "WINTER WONDERLAND!", "valentines": "HAPPY VALENTINE'S DAY!",
+                  "stpatricks": "HAPPY ST. PATRICK'S DAY!", "spring": "HELLO SPRING!", "easter": "HAPPY EASTER!",
+                  "summer": "SUMMER VIBES!", "anniversary": "HAPPY ANNIVERSARY, GRAND ROYALE!"}
 THEME_LOOK = {   # colour grade (multiply, then add) and the accent colour
     "halloween": ((255, 200, 170), (16, 2, 20), (255, 140, 20)),
     "winter": ((205, 222, 255), (10, 14, 26), (170, 220, 255)),
     "valentines": ((255, 205, 222), (22, 0, 10), (255, 110, 160)),
     "easter": ((232, 255, 228), (10, 14, 6), (190, 150, 240)),
     "summer": ((255, 242, 205), (24, 14, 0), (255, 200, 60)),
+    "christmas": ((255, 222, 215), (18, 6, 6), (230, 60, 60)),
+    "stpatricks": ((215, 255, 215), (4, 16, 6), (70, 210, 100)),
+    "anniversary": ((255, 240, 215), (18, 10, 24), (240, 200, 90)),
+    "fall": ((255, 220, 180), (22, 10, 0), (235, 130, 40)),
+    "spring": ((240, 255, 235), (12, 16, 10), (255, 160, 200)),
 }
 
 
@@ -15219,8 +15261,7 @@ def music_file(name):
 def flow_owner(session, rpc, body):
     yield from flow_refresh(session)
     r = yield HttpReq("POST", f"/rest/v1/rpc/{rpc}", body, token=session.access)
-    if r.status in (400, 401, 403) and "owner" in r.message().lower():
-        raise AccountError("ONLY THE OWNER CAN DO THAT")
+    owner_problem(r)
     need(r, "SENDING")
     return True
 
@@ -15327,8 +15368,8 @@ class LiveEvents:
 
     def started(self, kind):
         left = int(self.left(kind))
-        self.app.effects.toast(f"EVENT: {EVENT_NAMES[kind]}!", f"{EVENT_INFO[kind]}  ({left // 60}:{left % 60:02d})",
-                               "up")
+        self.app.effects.toast(f"{EVENT_NAMES[kind]}!", f"{EVENT_INFO[kind]}  ({left // 60}:{left % 60:02d})",
+                               "event:" + kind)
         self.app.sfx("alert")
 
     def ended(self, kind):
@@ -15399,6 +15440,8 @@ def make_backdrop(name):
     """The scene behind the lobby and the main menu (it's drawn under the tiles and buttons)."""
     s = pygame.Surface((W, H), pygame.SRCALPHA)
     rng = random.Random(3)
+    if backdrop2(s, name, rng):
+        return s
     if name == "halloween":
         for i in range(12):                                   # moon glow
             pygame.draw.circle(s, (255, 240, 200, 10), (1150, 108), 90 - i * 4)
@@ -15513,6 +15556,8 @@ def make_corners(name):
     """Small decorations tucked into the top corners (under the top bar) in every game."""
     s = pygame.Surface((W, H), pygame.SRCALPHA)
     y0 = 58
+    if corners2(s, name, y0):
+        return s
     if name == "halloween":
         _web(s, 0, y0, 110, False)
         _web(s, W, y0, 110, True)
@@ -15556,6 +15601,8 @@ def new_extra(name, y=None):
     """The bigger things drifting around: ghosts, snowflakes, balloons, butterflies, seagulls."""
     e = {"x": random.uniform(0, W), "y": random.uniform(80, H - 80) if y is None else y,
          "ph": random.uniform(0, 6.28), "s": random.uniform(0.8, 1.2)}
+    if new_extra2(name, e, y):
+        return e
     if name == "halloween":
         e.update(x=random.choice([-60.0, W + 60.0]), vy=0.0)
         e["vx"] = random.uniform(25, 45) * (1 if e["x"] < 0 else -1)
@@ -15574,6 +15621,8 @@ def new_extra(name, y=None):
 
 
 def draw_extra(surf, name, e, t):
+    if draw_extra2(surf, name, e, t):
+        return
     x, y, s = e["x"], e["y"], e["s"]
     if name == "halloween":                                   # a ghost
         yy = y + math.sin(t * 2 + e["ph"]) * 10
@@ -15618,7 +15667,11 @@ def draw_extra(surf, name, e, t):
                                                           (x + 7 * s, y - 4 * s), (x + 16 * s, y - flap)], 3)
 
 
-EXTRA_COUNT = {"halloween": 3, "winter": 7, "valentines": 4, "easter": 5, "summer": 4}
+EXTRA_COUNT = {"halloween": 3, "winter": 7, "valentines": 4, "easter": 5, "summer": 4, "christmas": 1,
+               "stpatricks": 6, "anniversary": 6, "fall": 1, "spring": 4}
+PART_COUNT = {"winter": 110, "halloween": 9, "valentines": 22, "easter": 26, "summer": 30, "christmas": 110,
+              "stpatricks": 24, "anniversary": 60, "fall": 30, "spring": 40}
+SWAYING = ("winter", "christmas", "easter", "fall", "spring", "stpatricks")        # blown about by the wind
 
 
 class ThemeFX:
@@ -15651,8 +15704,7 @@ class ThemeFX:
             e = new_extra(name, random.uniform(80, H - 120))
             e["x"] = random.uniform(60, W - 60)
             self.extras.append(e)
-        n = {"winter": 110, "halloween": 9, "valentines": 22, "easter": 26, "summer": 30}[name]
-        for _ in range(n):
+        for _ in range(PART_COUNT[name]):
             self.parts.append(self.new_part(random.uniform(0, H)))
         o = pygame.Surface((W, H), pygame.SRCALPHA)       # a soft glow around the edges in the theme's colour
         accent = THEME_LOOK[name][2]
@@ -15668,6 +15720,8 @@ class ThemeFX:
         n = self.name
         p = {"x": random.uniform(0, W), "y": -20.0 if y is None else y, "s": random.uniform(0.6, 1.4),
              "ph": random.uniform(0, 6.28)}
+        if new_part2(n, p, y):
+            return p
         if n == "winter":
             p.update(vy=random.uniform(30, 90), vx=random.uniform(-15, 15))
         elif n == "halloween":
@@ -15693,16 +15747,16 @@ class ThemeFX:
             self.reset(name)
         CURRENT_THEME = self.name                 # the games dress their pieces up for the season
         for i, p in enumerate(self.parts):
-            p["x"] += (p["vx"] + (math.sin(self.t * 1.3 + p["ph"]) * 18 if self.name in ("winter", "easter") else 0)) * dt
+            p["x"] += (p["vx"] + (math.sin(self.t * 1.3 + p["ph"]) * 18 if self.name in SWAYING else 0)) * dt
             p["y"] += p["vy"] * dt
             if p["y"] > H + 30 or p["y"] < -40 or p["x"] < -80 or p["x"] > W + 80:
                 self.parts[i] = self.new_part()
         for i, e in enumerate(self.extras):
-            if self.name == "easter" and random.random() < dt * 0.8:     # butterflies change their minds
+            if self.name in ("easter", "spring") and random.random() < dt * 0.8:     # butterflies / bees change their minds
                 e["vx"], e["vy"] = random.uniform(-45, 45), random.uniform(-30, 30)
             e["x"] += e["vx"] * dt
             e["y"] += e["vy"] * dt
-            if self.name == "easter":
+            if self.name in ("easter", "spring"):
                 e["y"] = max(80, min(H - 100, e["y"]))
                 if e["x"] < 20 or e["x"] > W - 20:
                     e["vx"] = -e["vx"]
@@ -15748,6 +15802,8 @@ class ThemeFX:
     def draw_part(self, surf, p):
         x, y, s = p["x"], p["y"], p["s"]
         n = self.name
+        if draw_part2(surf, n, p, self.t):
+            return
         if n == "winter":
             pygame.draw.circle(surf, (245, 250, 255), (x, y), 1.5 + 2.2 * s)
         elif n == "halloween":
@@ -15777,12 +15833,14 @@ class ThemeFX:
 
     def draw_garland(self, surf, y):
         n = self.name
-        if n == "winter":                                    # icicles and a line of snow
+        if n in ("winter", "christmas"):                     # icicles and a line of snow
             pygame.draw.rect(surf, (240, 248, 255), (0, y - 3, W, 6), border_radius=3)
             rng = random.Random(7)
             for x in range(6, W, 22):
                 ln = rng.uniform(8, 26)
                 pygame.draw.polygon(surf, (215, 235, 255), [(x - 5, y + 2), (x + 5, y + 2), (x, y + ln)])
+            if n == "winter":
+                return
             cols = [(255, 70, 70), (80, 220, 90), (255, 210, 60), (80, 160, 255)]     # twinkling lights
             pts = [(x, y + 10 + 8 * abs(math.sin(x / 88 * math.pi))) for x in range(0, W + 1, 22)]
             pygame.draw.lines(surf, (40, 60, 40), False, pts, 2)
@@ -15790,6 +15848,8 @@ class ThemeFX:
                 on = (i + int(self.t * 3)) % 3 != 0
                 col = cols[i % 4] if on else tuple(c // 3 for c in cols[i % 4])
                 pygame.draw.ellipse(surf, col, (bx - 4, by, 8, 11))
+            return
+        if garland2(surf, n, y, self.t):
             return
         pygame.draw.line(surf, (60, 50, 40), (0, y + 2), (W, y + 2), 2)
         if n == "summer":                                    # party flags
@@ -15815,94 +15875,212 @@ class ThemeFX:
                 pygame.draw.line(surf, (255, 255, 255), (x - 8, cy), (x + 8, cy), 3)
 
 
+def flow_owner_list(session):
+    yield from flow_refresh(session)
+    r = yield HttpReq("POST", "/rest/v1/rpc/casino_owner_players", {}, token=session.access)
+    owner_problem(r)
+    need(r, "LOADING PLAYERS")
+    return r.data if isinstance(r.data, list) else []
+
+
+def owner_problem(r):
+    msg = r.message().lower()
+    if r.status in (400, 401, 403) and "owner" in msg:
+        raise AccountError("ONLY THE OWNER CAN DO THAT")
+    if r.status == 404 or "could not find the function" in msg:
+        raise AccountError("RUN THE NEW SUPABASE SQL FIRST (supabase_casino_setup.sql)")
+    if r.status == 400 and msg:
+        raise AccountError(msg.upper()[:80])
+
+
 class OwnerMenu:
     """The ` menu - only for accounts marked is_owner in Supabase."""
-    PANEL = pygame.Rect(170, 60, 940, 600)
+    PANEL = pygame.Rect(150, 50, 980, 620)
+    ROWS = 10                    # players shown at once in the PLAYERS tab
 
     def __init__(self, app):
         self.app = app
         self.active = False
+        self.tab = "events"
+        self.focus = None            # which box is being typed in: "money", "search" or "amount"
         self.money_text = ""
-        self.editing = False
         self.minutes = {"double": 10, "rain": 5}
         self.scope = "everyone"
         P = self.PANEL
-        self.money_box = pygame.Rect(P.x + 40, P.y + 104, 300, 50)
-        self.btn_set = Button((P.x + 352, P.y + 104, 110, 50), "SET", (25, 120, 60), 20)
-        self.btn_quick = [(Button((P.x + 476 + i * 106, P.y + 104, 98, 50), label, (60, 60, 90), 17), amt)
+        self.tab_btns = [(Button((P.x + 40 + i * 214, P.y + 84, 204, 44), label, (60, 50, 90), 16), key)
+                         for i, (key, label) in enumerate((("events", "CHIPS & EVENTS"), ("themes", "THEMES"),
+                                                           ("players", "PLAYERS")))]
+        # CHIPS & EVENTS
+        self.money_box = pygame.Rect(P.x + 40, P.y + 176, 300, 50)
+        self.btn_set = Button((P.x + 352, P.y + 176, 110, 50), "SET", (25, 120, 60), 20)
+        self.btn_quick = [(Button((P.x + 476 + i * 106, P.y + 176, 98, 50), label, (60, 60, 90), 17), amt)
                           for i, (label, amt) in enumerate((("+10K", 10000), ("+1M", 10 ** 6), ("$500", None)))]
         self.rows = {}
         for i, k in enumerate(EVENT_KINDS):
-            y = P.y + 230 + i * 70
+            y = P.y + 300 + i * 74
             self.rows[k] = {"minus": Button((P.x + 330, y, 44, 48), "-", (60, 60, 90), 22),
                             "plus": Button((P.x + 470, y, 44, 48), "+", (60, 60, 90), 22),
                             "start": Button((P.x + 540, y, 150, 48), "START", (25, 120, 60), 18),
                             "stop": Button((P.x + 700, y, 110, 48), "STOP", (150, 35, 40), 18), "y": y}
-        self.theme_btns = [(Button((P.x + 40 + i * 146, P.y + 490, 138, 48), THEME_NAMES[t], (70, 60, 100), 15), t)
-                           for i, t in enumerate([""] + THEMES)]
-        self.scope_btns = [(Button((P.x + 560 + i * 170, P.y + 430, 160, 40), label, (40, 60, 110), 15), s)
+        # THEMES
+        self.scope_btns = [(Button((P.x + 40 + i * 190, P.y + 178, 180, 44), label, (40, 60, 110), 15), s)
                            for i, (label, s) in enumerate((("EVERYONE", "everyone"), ("JUST ME", "me")))]
+        self.theme_btns = [(Button((P.x + 40 + (i % 4) * 226, P.y + 290 + (i // 4) * 70, 214, 56), THEME_NAMES[t],
+                                   (70, 60, 100), 17), t) for i, t in enumerate([""] + THEMES)]
+        # PLAYERS
+        self.players = None          # [{"username", "balance", "updated_at"}] once loaded
+        self.list_flow = None
+        self.search = ""
+        self.scroll = 0
+        self.pick = None
+        self.amount = ""
+        self.search_box = pygame.Rect(P.x + 40, P.y + 150, 330, 44)
+        self.btn_refresh = Button((P.x + 380, P.y + 150, 130, 44), "REFRESH", (40, 60, 110), 15)
+        self.amount_box = pygame.Rect(P.x + 560, P.y + 290, 250, 50)
+        self.btn_give = Button((P.x + 820, P.y + 290, 120, 50), "SET", (25, 120, 60), 20)
+        self.btn_adds = [(Button((P.x + 560 + i * 97, P.y + 356, 89, 46), label, (60, 60, 90), 15), amt)
+                         for i, (label, amt) in enumerate((("+10K", 10 ** 4), ("+100K", 10 ** 5), ("+1M", 10 ** 6),
+                                                           ("$500", None)))]
         self.btn_close = Button((P.right - 60, P.y + 16, 44, 40), "X", (120, 35, 40), 20)
+        self.row_rects = []
 
     def allowed(self):
         return bool(self.app.session and self.app.session.is_owner)
 
     def toggle(self):
         self.active = not self.active and self.allowed()
-        self.editing = False
+        self.focus = None
+
+    def shown_players(self):
+        q = self.search.strip().lower()
+        return [p for p in (self.players or []) if q in str(p.get("username", "")).lower()]
+
+    def load_players(self):
+        if self.app.session and not self.list_flow:
+            self.list_flow = Flow(flow_owner_list(self.app.session))
+            self.app.events.owner_msg = "LOADING PLAYERS..."
+
+    def update(self):
+        if self.list_flow and self.list_flow.poll():
+            flow, self.list_flow = self.list_flow, None
+            if flow.error:
+                self.app.events.owner_msg = flow.error
+            else:
+                self.players = [p for p in flow.result if isinstance(p, dict) and p.get("username")]
+                self.app.events.owner_msg = f"{len(self.players)} PLAYERS"
+
+    def set_player(self, name, amount):
+        amount = max(0, min(10 ** 15, int(amount)))
+        self.app.events.owner_action("casino_owner_set_balance", {"player": name, "amount": amount},
+                                     f"{name.upper()} NOW HAS {money(amount)} (THEIR GAME UPDATES IN ~30s)")
+        for p in self.players or []:
+            if p["username"] == name:
+                p["balance"] = amount
+        if self.app.session and name.lower() == self.app.session.name.lower():
+            self.app.balance = amount                  # that's me
+        self.amount = ""
 
     def handle(self, e):
         app, ev = self.app, self.app.events
         if e.type == pygame.KEYDOWN:
             if e.key in (pygame.K_BACKQUOTE, pygame.K_ESCAPE):
                 self.active = False
-            elif self.editing:
+            elif self.focus:
+                text = {"money": self.money_text, "search": self.search, "amount": self.amount}[self.focus]
                 if e.key == pygame.K_BACKSPACE:
-                    self.money_text = self.money_text[:-1]
+                    text = text[:-1]
                 elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                    self.set_money()
-                elif e.unicode and e.unicode.isdigit() and len(self.money_text) < 13:
-                    self.money_text += e.unicode
+                    if self.focus == "money":
+                        self.set_money()
+                    elif self.focus == "amount" and self.pick and self.amount:
+                        self.set_player(self.pick, int(self.amount))
+                    self.focus = None
+                    return
+                elif e.unicode and self.focus in ("money", "amount") and e.unicode.isdigit() and len(text) < 13:
+                    text += e.unicode
+                elif e.unicode and self.focus == "search" and (e.unicode.isalnum() or e.unicode in "_-") and len(text) < 15:
+                    text += e.unicode
+                if self.focus == "money":
+                    self.money_text = text
+                elif self.focus == "search":
+                    self.search, self.scroll = text, 0
+                else:
+                    self.amount = text
+            return
+        if e.type == pygame.MOUSEWHEEL and self.tab == "players":
+            most = max(0, len(self.shown_players()) - self.ROWS)
+            self.scroll = max(0, min(most, self.scroll - e.y))
             return
         if e.type != pygame.MOUSEBUTTONDOWN or e.button != 1:
             return
         pos = e.pos
-        self.editing = self.money_box.collidepoint(pos)
+        self.focus = None
         if self.btn_close.clicked(pos):
             self.active = False
-        elif self.btn_set.clicked(pos):
-            self.set_money()
-        for b, amt in self.btn_quick:
+            return
+        for b, key in self.tab_btns:
             if b.clicked(pos):
-                app.balance = START_BALANCE if amt is None else app.balance + amt
-                app.save()
-                ev.owner_msg = f"YOUR CHIPS: {money(app.balance)}"
+                self.tab = key
+                if key == "players" and self.players is None:
+                    self.load_players()
+                return
         busy = bool(ev.owner_flow)
-        for k, row in self.rows.items():
-            if k in self.minutes:
-                if row["minus"].clicked(pos):
-                    self.minutes[k] = max(1, self.minutes[k] - (5 if self.minutes[k] > 5 else 1))
-                elif row["plus"].clicked(pos):
-                    self.minutes[k] = min(240, self.minutes[k] + (5 if self.minutes[k] >= 5 else 1))
-            secs = JACKPOT_SECONDS if k == "jackpot" else self.minutes[k] * 60
-            if row["start"].clicked(pos, not busy):
-                ev.owner_action("casino_owner_event", {"which": k, "seconds": secs},
-                                f"{EVENT_NAMES[k]} STARTED FOR EVERYONE")
-            elif row["stop"].clicked(pos, not busy):
-                ev.owner_action("casino_owner_event", {"which": k, "seconds": 0}, f"{EVENT_NAMES[k]} STOPPED")
-        for b, s in self.scope_btns:
-            if b.clicked(pos):
-                self.scope = s
-        for b, t in self.theme_btns:
-            if b.clicked(pos, not busy or self.scope == "me"):
-                if self.scope == "me":
-                    app.theme_mine = t or "none"
+        if self.tab == "events":
+            if self.money_box.collidepoint(pos):
+                self.focus = "money"
+            elif self.btn_set.clicked(pos):
+                self.set_money()
+            for b, amt in self.btn_quick:
+                if b.clicked(pos):
+                    app.balance = START_BALANCE if amt is None else app.balance + amt
                     app.save()
-                    ev.owner_msg = f"THEME FOR YOU ONLY: {THEME_NAMES[t]}"
-                else:
-                    app.theme_mine = ""
-                    app.save()
-                    ev.owner_action("casino_owner_theme", {"new_theme": t}, f"THEME FOR EVERYONE: {THEME_NAMES[t]}")
+                    ev.owner_msg = f"YOUR CHIPS: {money(app.balance)}"
+            for k, row in self.rows.items():
+                if k in self.minutes:
+                    if row["minus"].clicked(pos):
+                        self.minutes[k] = max(1, self.minutes[k] - (5 if self.minutes[k] > 5 else 1))
+                    elif row["plus"].clicked(pos):
+                        self.minutes[k] = min(240, self.minutes[k] + (5 if self.minutes[k] >= 5 else 1))
+                secs = JACKPOT_SECONDS if k == "jackpot" else self.minutes[k] * 60
+                if row["start"].clicked(pos, not busy):
+                    ev.owner_action("casino_owner_event", {"which": k, "seconds": secs},
+                                    f"{EVENT_NAMES[k]} STARTED FOR EVERYONE")
+                elif row["stop"].clicked(pos, not busy):
+                    ev.owner_action("casino_owner_event", {"which": k, "seconds": 0}, f"{EVENT_NAMES[k]} STOPPED")
+        elif self.tab == "themes":
+            for b, s in self.scope_btns:
+                if b.clicked(pos):
+                    self.scope = s
+            for b, t in self.theme_btns:
+                if b.clicked(pos, not busy or self.scope == "me"):
+                    if self.scope == "me":
+                        app.theme_mine = t or "none"
+                        app.save()
+                        ev.owner_msg = f"THEME FOR YOU ONLY: {THEME_NAMES[t]}"
+                    else:
+                        app.theme_mine = ""
+                        app.save()
+                        ev.owner_action("casino_owner_theme", {"new_theme": t}, f"THEME FOR EVERYONE: {THEME_NAMES[t]}")
+        else:
+            if self.search_box.collidepoint(pos):
+                self.focus = "search"
+            elif self.btn_refresh.clicked(pos, not self.list_flow):
+                self.load_players()
+            elif self.amount_box.collidepoint(pos) and self.pick:
+                self.focus = "amount"
+            elif self.btn_give.clicked(pos, bool(self.pick and self.amount) and not busy):
+                self.set_player(self.pick, int(self.amount))
+            else:
+                for b, amt in self.btn_adds:
+                    if b.clicked(pos, bool(self.pick) and not busy):
+                        now = next((p.get("balance") or 0 for p in self.players or [] if p["username"] == self.pick), 0)
+                        self.set_player(self.pick, START_BALANCE if amt is None else int(now) + amt)
+                        return
+                for rect, name in self.row_rects:
+                    if rect.collidepoint(pos):
+                        self.pick, self.amount = name, ""
+                        self.focus = "amount"
+                        return
 
     def set_money(self):
         if self.money_text:
@@ -15910,9 +16088,17 @@ class OwnerMenu:
             self.app.save()
             self.app.events.owner_msg = f"YOUR CHIPS SET TO {money(self.app.balance)}"
             self.money_text = ""
-        self.editing = False
+        self.focus = None
+
+    def text_box(self, surf, rect, text, focused, placeholder):
+        pygame.draw.rect(surf, (6, 6, 12), rect, border_radius=10)
+        pygame.draw.rect(surf, GOLD if focused else (100, 90, 120), rect, width=2, border_radius=10)
+        shown = text + ("|" if focused and int(time.time() * 2) % 2 == 0 else "")
+        draw_text(surf, shown or placeholder, font(19, bold=True), WHITE if shown else (140, 140, 160),
+                  (rect.x + 14, rect.centery), anchor="midleft")
 
     def draw(self, surf):
+        self.update()
         app, ev = self.app, self.app.events
         mouse = pygame.mouse.get_pos()
         dim = pygame.Surface((W, H), pygame.SRCALPHA)
@@ -15925,49 +16111,93 @@ class OwnerMenu:
         draw_text(surf, f"{app.session.name}  -  events and themes reach every player within ~15 seconds",
                   font(13), (190, 180, 200), (P.x + 40, P.y + 64), anchor="midleft")
         self.btn_close.draw(surf, mouse)
-        # money
-        draw_text(surf, "MY CHIPS", font(16, bold=True), GOLD, (P.x + 40, P.y + 86), anchor="midleft")
-        pygame.draw.rect(surf, (6, 6, 12), self.money_box, border_radius=10)
-        pygame.draw.rect(surf, GOLD if self.editing else (100, 90, 120), self.money_box, width=2, border_radius=10)
-        shown = self.money_text + ("|" if self.editing and int(time.time() * 2) % 2 == 0 else "")
-        draw_text(surf, shown or f"now {money(app.balance)}", font(20, bold=True), WHITE if shown else (140, 140, 160),
-                  (self.money_box.x + 14, self.money_box.centery), anchor="midleft")
-        self.btn_set.draw(surf, mouse, bool(self.money_text))
-        for b, _ in self.btn_quick:
+        for b, key in self.tab_btns:
+            b.color = (200, 150, 30) if key == self.tab else (60, 50, 90)
             b.draw(surf, mouse)
-        # events
-        draw_text(surf, "EVENTS  (FOR EVERYONE)", font(16, bold=True), GOLD, (P.x + 40, P.y + 200), anchor="midleft")
+        pygame.draw.line(surf, GOLD_DARK, (P.x + 30, P.y + 138), (P.right - 30, P.y + 138))
         busy = bool(ev.owner_flow)
-        for k, row in self.rows.items():
-            y = row["y"]
-            on = ev.active(k)
-            draw_text(surf, EVENT_NAMES[k], font(18, bold=True), WHITE, (P.x + 40, y + 16), anchor="midleft")
-            left = int(ev.left(k))
-            draw_text(surf, f"ON  {left // 60}:{left % 60:02d}" if on else "off", font(13, bold=True),
-                      (120, 240, 140) if on else (150, 140, 160), (P.x + 40, y + 38), anchor="midleft")
-            if k in self.minutes:
-                row["minus"].draw(surf, mouse)
-                row["plus"].draw(surf, mouse)
-                draw_text(surf, f"{self.minutes[k]} MIN", font(18, bold=True), WHITE, (P.x + 422, y + 24))
+        if self.tab == "events":
+            draw_text(surf, "MY CHIPS", font(16, bold=True), GOLD, (P.x + 40, P.y + 160), anchor="midleft")
+            self.text_box(surf, self.money_box, self.money_text, self.focus == "money", f"now {money(app.balance)}")
+            self.btn_set.draw(surf, mouse, bool(self.money_text))
+            for b, _ in self.btn_quick:
+                b.draw(surf, mouse)
+            draw_text(surf, "EVENTS  (FOR EVERYONE)", font(16, bold=True), GOLD, (P.x + 40, P.y + 272), anchor="midleft")
+            for k, row in self.rows.items():
+                y = row["y"]
+                on = ev.active(k)
+                draw_text(surf, EVENT_NAMES[k], font(18, bold=True), WHITE, (P.x + 40, y + 16), anchor="midleft")
+                left = int(ev.left(k))
+                draw_text(surf, f"ON  {left // 60}:{left % 60:02d}" if on else "off", font(13, bold=True),
+                          (120, 240, 140) if on else (150, 140, 160), (P.x + 40, y + 38), anchor="midleft")
+                if k in self.minutes:
+                    row["minus"].draw(surf, mouse)
+                    row["plus"].draw(surf, mouse)
+                    draw_text(surf, f"{self.minutes[k]} MIN", font(18, bold=True), WHITE, (P.x + 422, y + 24))
+                else:
+                    draw_text(surf, "3:03 + SONG", font(16, bold=True), GOLD, (P.x + 422, y + 24))
+                row["start"].draw(surf, mouse, not busy)
+                row["stop"].draw(surf, mouse, not busy and on)
+        elif self.tab == "themes":
+            draw_text(surf, "WHO SEES IT", font(16, bold=True), GOLD, (P.x + 40, P.y + 162), anchor="midleft")
+            for b, s in self.scope_btns:
+                b.color = (200, 150, 30) if s == self.scope else (40, 60, 110)
+                b.draw(surf, mouse)
+            mine = app.theme_mine
+            now = f"everyone: {THEME_NAMES.get(ev.theme, 'NONE')}" + (
+                f"   |   just you: {THEME_NAMES.get('' if mine == 'none' else mine, 'NONE')}" if mine else "")
+            draw_text(surf, now, font(14), (190, 180, 200), (P.x + 440, P.y + 200), anchor="midleft")
+            draw_text(surf, "SEASON", font(16, bold=True), GOLD, (P.x + 40, P.y + 266), anchor="midleft")
+            current = app.themefx.current()
+            for b, t in self.theme_btns:
+                b.color = (200, 150, 30) if t == current else (70, 60, 100)
+                b.draw(surf, mouse, not busy or self.scope == "me")
+                if t:
+                    theme_icon(surf, t, b.rect.x + 26, b.rect.centery, 13)
+        else:
+            self.text_box(surf, self.search_box, self.search, self.focus == "search", "search for a player")
+            self.btn_refresh.draw(surf, mouse, not self.list_flow)
+            self.row_rects = []
+            lst = self.shown_players()
+            if self.players is None:
+                draw_text(surf, "Loading..." if self.list_flow else "Press REFRESH", font(16), (170, 160, 190),
+                          (P.x + 275, P.y + 300))
+            elif not lst:
+                draw_text(surf, "No players found", font(16), (170, 160, 190), (P.x + 275, P.y + 300))
+            for i, p in enumerate(lst[self.scroll:self.scroll + self.ROWS]):
+                r = pygame.Rect(P.x + 40, P.y + 206 + i * 36, 470, 32)
+                picked = p["username"] == self.pick
+                pygame.draw.rect(surf, (200, 150, 30) if picked else ((50, 40, 70) if r.collidepoint(mouse) else (30, 24, 42)),
+                                 r, border_radius=8)
+                draw_text(surf, p["username"], font(16, bold=True), (30, 15, 5) if picked else WHITE, (r.x + 12, r.centery),
+                          anchor="midleft")
+                bal = p.get("balance")
+                draw_text(surf, money(int(bal)) if bal is not None else "-", font(15, bold=True),
+                          (30, 15, 5) if picked else (120, 230, 140), (r.right - 12, r.centery), anchor="midright")
+                self.row_rects.append((r, p["username"]))
+            if len(lst) > self.ROWS:
+                draw_text(surf, f"{self.scroll + 1}-{min(len(lst), self.scroll + self.ROWS)} of {len(lst)}  (scroll)",
+                          font(12), (150, 140, 170), (P.x + 275, P.y + 580))
+            box = pygame.Rect(P.x + 540, P.y + 150, 400, 280)
+            pygame.draw.rect(surf, (28, 22, 38), box, border_radius=14)
+            if self.pick:
+                p = next((q for q in self.players or [] if q["username"] == self.pick), {})
+                draw_text(surf, self.pick, font(26, bold=True), GOLD, (box.x + 20, box.y + 34), anchor="midleft")
+                bal = p.get("balance")
+                draw_text(surf, f"chips (last saved): {money(int(bal)) if bal is not None else '-'}", font(15),
+                          (200, 190, 215), (box.x + 20, box.y + 70), anchor="midleft")
+                draw_text(surf, "SET THEIR CHIPS TO", font(13, bold=True), (190, 180, 200), (box.x + 20, box.y + 124),
+                          anchor="midleft")
+                self.text_box(surf, self.amount_box, self.amount, self.focus == "amount", "type an amount")
+                self.btn_give.draw(surf, mouse, bool(self.amount) and not busy)
+                for b, _ in self.btn_adds:
+                    b.draw(surf, mouse, not busy)
+                draw_text(surf, "Their game picks it up within about 30 seconds.", font(13), (160, 150, 180),
+                          (box.x + 20, box.bottom - 22), anchor="midleft")
             else:
-                draw_text(surf, "3:03 + SONG", font(16, bold=True), GOLD, (P.x + 422, y + 24))
-            row["start"].draw(surf, mouse, not busy)
-            row["stop"].draw(surf, mouse, not busy and on)
-        # themes
-        draw_text(surf, "THEME", font(16, bold=True), GOLD, (P.x + 40, P.y + 450), anchor="midleft")
-        mine = app.theme_mine
-        now = f"everyone: {THEME_NAMES.get(ev.theme, 'NONE')}" + (f"   |   just you: {THEME_NAMES.get('' if mine == 'none' else mine, 'NONE')}"
-                                                                   if mine else "")
-        draw_text(surf, now, font(13), (190, 180, 200), (P.x + 120, P.y + 450), anchor="midleft")
-        for b, s in self.scope_btns:
-            b.color = (200, 150, 30) if s == self.scope else (40, 60, 110)
-            b.draw(surf, mouse)
-        current = app.themefx.current()
-        for b, t in self.theme_btns:
-            b.color = (200, 150, 30) if t == current else (70, 60, 100)
-            b.draw(surf, mouse, not busy or self.scope == "me")
+                draw_text(surf, "Click a player to change their chips", font(16), (170, 160, 190), box.center)
         if ev.owner_msg:
-            bad = "ONLY" in ev.owner_msg or "FAILED" in ev.owner_msg or "CAN'T" in ev.owner_msg or "ISN'T" in ev.owner_msg
+            bad = any(w in ev.owner_msg for w in ("ONLY", "FAILED", "CAN'T", "ISN'T", "RUN THE", "NO PLAYER", "NOT ALLOWED"))
             draw_text(surf, ev.owner_msg, font(15, bold=True), (240, 130, 130) if bad else (140, 230, 160),
                       (P.centerx, P.bottom - 24))
 
@@ -15988,7 +16218,9 @@ def themed(key, make):
 
 
 def theme_icon(surf, theme, cx, cy, r, alt=False):
-    """Each season's two emblems: pumpkin/bat, snowflake/snowman, heart/rose, egg/bunny, sun/palm tree."""
+    """Each season's two emblems: pumpkin/bat, snowflake/snowman, heart/rose, egg/bunny, sun/palm tree..."""
+    if theme_icon2(surf, theme, cx, cy, r, alt):
+        return
     if theme == "halloween" and not alt:                          # jack-o'-lantern
         pygame.draw.ellipse(surf, (230, 115, 20), (cx - r, cy - r * 0.8, 2 * r, 1.7 * r))
         for dx in (-0.45, 0.45):
@@ -16073,7 +16305,9 @@ def theme_icon(surf, theme, cx, cy, r, alt=False):
 # ---- card backs -----------------------------------------------------------------------
 THEME_BACK = {"halloween": ((50, 20, 60), (255, 140, 20)), "winter": ((25, 55, 110), (220, 240, 255)),
               "valentines": ((170, 20, 55), (255, 190, 210)), "easter": ((150, 120, 210), (255, 240, 170)),
-              "summer": ((20, 150, 180), (255, 220, 90))}
+              "summer": ((20, 150, 180), (255, 220, 90)), "christmas": ((150, 20, 30), (230, 190, 80)),
+              "stpatricks": ((20, 110, 50), (255, 215, 80)), "anniversary": ((60, 20, 90), (240, 200, 90)),
+              "fall": ((120, 55, 20), (255, 190, 90)), "spring": ((150, 210, 150), (255, 180, 210))}
 
 
 def make_themed_back(theme):
@@ -16125,6 +16359,22 @@ def draw_theme_ball(surf, x, y, r):
             pygame.draw.circle(s, (255, 170, 195), (c - R * 0.42, c - R * 0.42), R * 0.2)
         elif t == "easter":
             theme_icon(s, t, c, c, R * 1.02)
+        elif t in ("christmas", "fall", "spring"):              # an ornament, an acorn, a ladybug
+            theme_icon(s, t, c, c + (R * 0.1 if t == "christmas" else 0), R, alt=t != "christmas")
+        elif t == "stpatricks":                                 # a gold coin
+            pygame.draw.circle(s, (200, 150, 20), (c, c), R)
+            pygame.draw.circle(s, (255, 210, 60), (c - R * 0.06, c - R * 0.06), R * 0.9)
+            pygame.draw.circle(s, (215, 165, 30), (c, c), R * 0.62, max(2, int(R * 0.1)))
+            draw_shamrock(s, c, c - R * 0.05, R * 0.45, (40, 150, 70))
+        elif t == "anniversary":                                # a disco ball
+            pygame.draw.circle(s, (170, 170, 185), (c, c), R)
+            for i in range(-4, 5):
+                for j in range(-4, 5):
+                    x, y = c + i * R * 0.24, c + j * R * 0.24
+                    if math.hypot(x - c, y - c) < R * 0.9:
+                        shade = 200 + ((i * 3 + j * 5) % 5) * 12
+                        pygame.draw.rect(s, (shade, shade, min(255, shade + 20)), (x - R * 0.1, y - R * 0.1, R * 0.2, R * 0.2))
+            pygame.draw.circle(s, (255, 255, 255), (c - R * 0.35, c - R * 0.35), R * 0.14)
         else:                                                   # beach ball
             for i, col in enumerate(((230, 60, 60), (255, 255, 255), (60, 130, 230), (255, 210, 60))):
                 pygame.draw.circle(s, col, (c, c), R, draw_top_left=i == 0, draw_top_right=i == 1,
@@ -16145,6 +16395,11 @@ CUP_THEME = {   # body, shine, stripes, rim (dark), rim (light), base
     "valentines": ((230, 80, 130), (255, 150, 185), (255, 240, 245), (170, 40, 90), (245, 120, 160), (150, 30, 75)),
     "easter": ((165, 135, 225), (205, 185, 250), (255, 240, 150), (120, 95, 180), (185, 160, 240), (105, 80, 160)),
     "summer": ((30, 165, 195), (110, 215, 235), (255, 220, 80), (20, 115, 140), (60, 190, 215), (15, 100, 125)),
+    "christmas": ((200, 30, 40), (240, 90, 90), (255, 255, 255), (140, 15, 25), (225, 60, 60), (120, 10, 20)),
+    "stpatricks": ((30, 150, 70), (90, 200, 120), (255, 215, 80), (20, 100, 45), (60, 180, 95), (15, 85, 40)),
+    "anniversary": ((110, 50, 170), (160, 110, 220), (240, 200, 90), (75, 30, 125), (140, 85, 200), (65, 25, 110)),
+    "fall": ((190, 95, 30), (230, 145, 70), (110, 60, 25), (140, 65, 20), (215, 120, 50), (120, 55, 15)),
+    "spring": ((140, 210, 150), (190, 240, 200), (255, 170, 200), (95, 165, 110), (160, 225, 170), (85, 150, 100)),
 }
 
 # ---- coin flip faces ----------------------------------------------------------------------
@@ -16154,6 +16409,11 @@ COIN_THEME = {   # rim, face dark, face light, ring, ink
     "valentines": ((150, 40, 75), (235, 120, 155), (255, 195, 215), (190, 70, 110), (110, 15, 50)),
     "easter": ((150, 125, 200), (215, 195, 250), (250, 240, 255), (175, 150, 225), (90, 60, 140)),
     "summer": ((170, 110, 20), (240, 190, 60), (255, 235, 140), (200, 140, 30), (120, 70, 10)),
+    "christmas": ((120, 90, 20), (215, 170, 60), (255, 230, 140), (170, 130, 30), (120, 20, 30)),
+    "stpatricks": ((150, 110, 20), (230, 180, 50), (255, 230, 120), (190, 145, 30), (20, 90, 40)),
+    "anniversary": ((150, 150, 160), (200, 200, 210), (250, 250, 255), (170, 170, 185), (80, 40, 120)),
+    "fall": ((120, 60, 20), (200, 120, 50), (250, 190, 120), (160, 85, 30), (70, 30, 10)),
+    "spring": ((110, 160, 110), (190, 230, 190), (240, 255, 240), (140, 190, 140), (170, 60, 110)),
 }
 
 
@@ -16183,11 +16443,21 @@ DIE_THEME = {   # edge, face, shine, pips
     "valentines": ((160, 30, 70), (240, 110, 150), (255, 170, 200), (255, 255, 255)),
     "easter": ((130, 105, 190), (195, 175, 245), (225, 210, 255), (255, 240, 130)),
     "summer": ((15, 110, 135), (40, 185, 210), (120, 225, 240), (255, 255, 255)),
+    "christmas": ((140, 15, 25), (210, 35, 45), (240, 90, 95), (255, 255, 255)),
+    "stpatricks": ((20, 100, 45), (40, 160, 80), (100, 210, 130), (255, 220, 90)),
+    "anniversary": ((170, 130, 40), (230, 190, 80), (250, 225, 140), (80, 30, 120)),
+    "fall": ((110, 55, 20), (200, 120, 50), (235, 165, 90), (60, 25, 10)),
+    "spring": ((150, 200, 150), (225, 250, 225), (245, 255, 245), (220, 80, 140)),
 }
 
 # ---- slot machine: three of the fruit become seasonal (same payouts) --------------------------
 THEME_SLOTS = {"halloween": {"cherry": "candycorn", "lemon": "pumpkin", "orange": "ghost"},
-               "winter": {"cherry": "candycane", "lemon": "snowflake", "orange": "snowman"},
+               "winter": {"cherry": "mitten", "lemon": "snowflake", "orange": "snowman"},
+               "christmas": {"cherry": "candycane", "lemon": "present", "orange": "xtree"},
+               "stpatricks": {"cherry": "horseshoe", "lemon": "shamrock", "orange": "potofgold"},
+               "anniversary": {"cherry": "cake", "lemon": "star", "orange": "gift"},
+               "fall": {"cherry": "apple", "lemon": "leaf", "orange": "acorn"},
+               "spring": {"cherry": "ladybug", "lemon": "tulip", "orange": "blossom"},
                "valentines": {"cherry": "heart", "lemon": "rose", "orange": "letter"},
                "easter": {"cherry": "egg", "lemon": "chick", "orange": "carrot"},
                "summer": {"cherry": "watermelon", "lemon": "sun", "orange": "beachball"}}
@@ -16198,6 +16468,8 @@ def make_theme_symbol(kind):
     w, h = SYM_W * k, SYM_H * k
     s = pygame.Surface((w, h), pygame.SRCALPHA)
     cx, cy, r = w / 2, h / 2, h * 0.38
+    if theme_symbol2(s, kind, cx, cy, r):
+        return pygame.transform.smoothscale(s, (SYM_W, SYM_H))
     if kind == "candycorn":
         pts = [(cx - r * 0.8, cy + r * 0.8), (cx + r * 0.8, cy + r * 0.8), (cx, cy - r)]
         pygame.draw.polygon(s, (255, 250, 235), pts)
@@ -16275,6 +16547,8 @@ def draw_theme_bomb(surf, cx, cy, r):
     t = CURRENT_THEME
     if not t:
         return False
+    if bomb2(surf, t, cx, cy, r):
+        return True
     if t == "halloween":                                       # skull
         pygame.draw.circle(surf, (235, 230, 220), (cx, cy - r * 0.15), r * 0.85)
         pygame.draw.rect(surf, (235, 230, 220), (cx - r * 0.5, cy + r * 0.3, r, r * 0.5), border_radius=4)
@@ -16320,6 +16594,8 @@ def theme_gem(size):
 # ---- the chicken's costume ------------------------------------------------------------------
 def draw_chicken_costume(surf, x, y, k, top):
     t = CURRENT_THEME
+    if costume2(surf, t, x, y, k, top):
+        return
     if t == "halloween":                                       # witch hat
         pygame.draw.ellipse(surf, (25, 15, 35), (x - 20 * k, top - 6 * k, 40 * k, 9 * k))
         pygame.draw.polygon(surf, (25, 15, 35), [(x - 11 * k, top - 3 * k), (x + 11 * k, top - 3 * k), (x + 6 * k, top - 30 * k)])
@@ -16342,6 +16618,524 @@ def draw_chicken_costume(surf, x, y, k, top):
         for ex in (-8, 8):
             pygame.draw.rect(surf, (20, 20, 30), (x + ex * k - 6 * k, y - 10 * k, 12 * k, 8 * k), border_radius=int(3 * k))
         pygame.draw.line(surf, (20, 20, 30), (x - 2 * k, y - 7 * k), (x + 2 * k, y - 7 * k), max(1, int(2 * k)))
+
+
+# ---- more seasons: Christmas, St. Patrick's Day, the casino's anniversary, fall and spring ----------------------
+# (Winter is just snow now - Christmas has the tree, the wreaths, the presents and Santa.)
+def star_points(cx, cy, r_out, r_in, n=5, rot=-math.pi / 2):
+    return [(cx + math.cos(rot + i * math.pi / n) * (r_out if i % 2 == 0 else r_in),
+             cy + math.sin(rot + i * math.pi / n) * (r_out if i % 2 == 0 else r_in)) for i in range(2 * n)]
+
+
+MAPLE = [(0, -1), (0.15, -0.6), (0.35, -0.75), (0.3, -0.35), (0.75, -0.45), (0.6, -0.15), (0.9, 0.0), (0.45, 0.2),
+         (0.5, 0.45), (0.1, 0.3), (0.06, 0.62), (-0.06, 0.62), (-0.1, 0.3), (-0.5, 0.45), (-0.45, 0.2), (-0.9, 0.0),
+         (-0.6, -0.15), (-0.75, -0.45), (-0.3, -0.35), (-0.35, -0.75), (-0.15, -0.6)]
+LEAF_COLS = [(230, 100, 30), (200, 50, 30), (240, 170, 40), (170, 90, 40)]
+CONFETTI_COLS = [(255, 90, 90), (255, 210, 60), (90, 200, 255), (140, 230, 120), (220, 120, 255), (255, 150, 60)]
+
+
+def draw_maple(surf, cx, cy, r, col, rot=0.0):
+    c, s_ = math.cos(rot), math.sin(rot)
+    pts = [(cx + (x * c - y * s_) * r, cy + (x * s_ + y * c) * r) for x, y in MAPLE]
+    pygame.draw.polygon(surf, col, pts)
+    pygame.draw.line(surf, lerp_col(col, (60, 30, 10), 0.5), (cx - s_ * 0.6 * r, cy + c * 0.6 * r),
+                     (cx - s_ * r, cy + c * r), max(1, int(r * 0.1)))
+
+
+def draw_shamrock(surf, cx, cy, r, col=(40, 160, 70)):
+    pygame.draw.line(surf, lerp_col(col, (0, 0, 0), 0.25), (cx, cy), (cx + r * 0.25, cy + r * 0.95), max(2, int(r * 0.14)))
+    for a in (-90, 30, 150):
+        ang = math.radians(a)
+        lx, ly = cx + math.cos(ang) * r * 0.42, cy + math.sin(ang) * r * 0.42
+        for side in (-1, 1):                  # each leaf is a little heart: two circles
+            pa = ang + side * math.pi / 2
+            pygame.draw.circle(surf, col, (lx + math.cos(pa) * r * 0.17, ly + math.sin(pa) * r * 0.17), r * 0.27)
+        pygame.draw.polygon(surf, col, [(cx, cy), (lx + math.cos(ang + 1.2) * r * 0.36, ly + math.sin(ang + 1.2) * r * 0.36),
+                                        (lx + math.cos(ang - 1.2) * r * 0.36, ly + math.sin(ang - 1.2) * r * 0.36)])
+    pygame.draw.circle(surf, lighten(col, 40), (cx, cy), max(1, r * 0.1))
+
+
+def draw_gift(surf, cx, cy, r, box, ribbon):
+    body = pygame.Rect(0, 0, r * 1.5, r * 1.1)
+    body.midtop = (cx, cy - r * 0.25)
+    pygame.draw.rect(surf, box, body, border_radius=max(1, int(r * 0.08)))
+    lid = pygame.Rect(0, 0, r * 1.7, r * 0.38)
+    lid.midbottom = (cx, cy - r * 0.2)
+    pygame.draw.rect(surf, lighten(box, 25), lid, border_radius=max(1, int(r * 0.08)))
+    w = max(2, int(r * 0.22))
+    pygame.draw.rect(surf, ribbon, (cx - w / 2, lid.y, w, body.bottom - lid.y))
+    pygame.draw.rect(surf, ribbon, (body.x, body.y + body.h * 0.35, body.w, w * 0.8))
+    for side in (-1, 1):
+        pygame.draw.ellipse(surf, ribbon, (cx + (0 if side > 0 else -r * 0.55), lid.y - r * 0.38, r * 0.55, r * 0.42),
+                            max(2, int(r * 0.13)))
+
+
+def draw_xmas_tree(surf, cx, cy, r, lights=True):
+    pygame.draw.rect(surf, (110, 70, 35), (cx - r * 0.12, cy + r * 0.62, r * 0.24, r * 0.35))
+    for k in range(3):
+        w, top = r * (0.85 - k * 0.2), cy - r * (0.2 + k * 0.42)
+        pygame.draw.polygon(surf, (30, 130, 60) if k % 2 == 0 else (25, 115, 52),
+                            [(cx - w, top + r * 0.85), (cx + w, top + r * 0.85), (cx, top - r * 0.1)])
+    if lights:
+        for i, (dx, dy) in enumerate(((-0.4, 0.5), (0.35, 0.35), (-0.15, 0.15), (0.2, -0.1), (-0.25, -0.3),
+                                      (0.1, -0.55), (0.5, 0.58), (-0.55, 0.62))):
+            pygame.draw.circle(surf, [(255, 70, 70), (255, 215, 60), (80, 170, 255), (255, 140, 220)][i % 4],
+                               (cx + dx * r, cy + dy * r), max(1, r * 0.08))
+    pygame.draw.polygon(surf, (255, 215, 60), star_points(cx, cy - r * 1.18, r * 0.24, r * 0.1))
+
+
+def draw_wreath(surf, cx, cy, r):
+    for i in range(22):
+        a = i / 22 * 2 * math.pi
+        pygame.draw.circle(surf, (25, 110 + (i % 3) * 18, 50), (cx + math.cos(a) * r, cy + math.sin(a) * r), r * 0.3)
+    for i in range(7):
+        a = i / 7 * 2 * math.pi + 0.3
+        pygame.draw.circle(surf, (210, 30, 40), (cx + math.cos(a) * r * 1.02, cy + math.sin(a) * r * 1.02), max(2, r * 0.1))
+    by = cy + r * 0.95                          # the bow
+    pygame.draw.polygon(surf, (200, 25, 35), [(cx, by), (cx - r * 0.55, by - r * 0.3), (cx - r * 0.55, by + r * 0.3)])
+    pygame.draw.polygon(surf, (200, 25, 35), [(cx, by), (cx + r * 0.55, by - r * 0.3), (cx + r * 0.55, by + r * 0.3)])
+    pygame.draw.line(surf, (200, 25, 35), (cx, by), (cx - r * 0.25, by + r * 0.75), max(2, int(r * 0.15)))
+    pygame.draw.line(surf, (200, 25, 35), (cx, by), (cx + r * 0.25, by + r * 0.75), max(2, int(r * 0.15)))
+    pygame.draw.circle(surf, (240, 60, 70), (cx, by), max(2, r * 0.14))
+
+
+def draw_balloon(surf, x, y, r, col, string=True):
+    if string:
+        pygame.draw.line(surf, (235, 235, 235), (x, y + r * 1.1), (x + math.sin(y / 30) * 4, y + r * 3), 1)
+    pygame.draw.ellipse(surf, col, (x - r, y - r * 1.15, r * 2, r * 2.3))
+    pygame.draw.polygon(surf, col, [(x, y + r * 1.05), (x - r * 0.2, y + r * 1.3), (x + r * 0.2, y + r * 1.3)])
+    pygame.draw.ellipse(surf, lighten(col, 70), (x - r * 0.55, y - r * 0.8, r * 0.4, r * 0.6))
+
+
+def draw_blossom(surf, x, y, r, col=(255, 185, 210)):
+    for i in range(5):
+        a = i / 5 * 2 * math.pi - math.pi / 2
+        pygame.draw.circle(surf, col, (x + math.cos(a) * r * 0.55, y + math.sin(a) * r * 0.55), r * 0.5)
+    pygame.draw.circle(surf, (255, 235, 150), (x, y), max(1, r * 0.3))
+
+
+def theme_icon2(surf, theme, cx, cy, r, alt):
+    """The newer seasons' emblems. Returns False for a theme it doesn't know."""
+    if theme == "christmas" and not alt:                          # ornament bauble
+        pygame.draw.circle(surf, (205, 25, 40), (cx, cy + r * 0.12), r * 0.78)
+        pygame.draw.arc(surf, (255, 215, 90), (cx - r * 0.78, cy - r * 0.2, r * 1.56, r * 0.6), math.pi, 2 * math.pi,
+                        max(1, int(r * 0.1)))
+        pygame.draw.circle(surf, (255, 150, 150), (cx - r * 0.3, cy - r * 0.2), r * 0.16)
+        pygame.draw.rect(surf, (230, 190, 80), (cx - r * 0.2, cy - r * 0.82, r * 0.4, r * 0.2))
+        pygame.draw.circle(surf, (230, 190, 80), (cx, cy - r * 0.95), max(2, r * 0.14), max(1, int(r * 0.06)))
+    elif theme == "christmas":
+        draw_xmas_tree(surf, cx, cy + r * 0.1, r * 0.85)
+    elif theme == "stpatricks" and not alt:
+        draw_shamrock(surf, cx, cy - r * 0.05, r)
+    elif theme == "stpatricks":                                   # pot of gold
+        for i, (dx, dy) in enumerate(((-0.35, -0.3), (0.0, -0.45), (0.35, -0.3), (-0.15, -0.55), (0.18, -0.6))):
+            pygame.draw.circle(surf, (255, 205, 50), (cx + dx * r, cy + dy * r), r * 0.22)
+            pygame.draw.circle(surf, (200, 150, 20), (cx + dx * r, cy + dy * r), r * 0.22, max(1, int(r * 0.05)))
+        pygame.draw.ellipse(surf, (35, 35, 40), (cx - r * 0.75, cy - r * 0.3, r * 1.5, r * 1.2))
+        pygame.draw.ellipse(surf, (60, 60, 70), (cx - r * 0.8, cy - r * 0.38, r * 1.6, r * 0.3))
+        pygame.draw.ellipse(surf, (90, 90, 100), (cx - r * 0.45, cy - r * 0.05, r * 0.3, r * 0.5))
+    elif theme == "anniversary" and not alt:                      # gold star
+        pygame.draw.polygon(surf, (190, 140, 30), star_points(cx, cy + r * 0.04, r, r * 0.45))
+        pygame.draw.polygon(surf, (255, 210, 70), star_points(cx, cy, r * 0.88, r * 0.4))
+        pygame.draw.polygon(surf, (255, 240, 170), star_points(cx - r * 0.1, cy - r * 0.1, r * 0.3, r * 0.14))
+    elif theme == "anniversary":
+        draw_gift(surf, cx, cy, r, (120, 60, 190), (255, 210, 70))
+    elif theme == "fall" and not alt:
+        draw_maple(surf, cx, cy, r, (225, 95, 30))
+    elif theme == "fall":                                         # acorn
+        pygame.draw.ellipse(surf, (200, 150, 80), (cx - r * 0.45, cy - r * 0.35, r * 0.9, r * 1.2))
+        pygame.draw.ellipse(surf, (230, 185, 110), (cx - r * 0.25, cy - r * 0.2, r * 0.25, r * 0.6))
+        pygame.draw.ellipse(surf, (110, 70, 35), (cx - r * 0.58, cy - r * 0.62, r * 1.16, r * 0.58))
+        pygame.draw.line(surf, (90, 55, 25), (cx, cy - r * 0.6), (cx + r * 0.12, cy - r * 0.95), max(2, int(r * 0.12)))
+    elif theme == "spring" and not alt:                           # tulip
+        pygame.draw.line(surf, (60, 150, 60), (cx, cy - r * 0.2), (cx, cy + r), max(2, int(r * 0.12)))
+        pygame.draw.ellipse(surf, (80, 170, 70), (cx - r * 0.55, cy + r * 0.25, r * 0.55, r * 0.3))
+        pygame.draw.ellipse(surf, (240, 70, 120), (cx - r * 0.45, cy - r * 0.8, r * 0.9, r * 0.85))
+        for pts in ([(cx - r * 0.45, cy - r * 0.35), (cx - r * 0.45, cy - r * 1.0), (cx - r * 0.1, cy - r * 0.6)],
+                    [(cx - r * 0.22, cy - r * 0.55), (cx, cy - r * 1.05), (cx + r * 0.22, cy - r * 0.55)],
+                    [(cx + r * 0.45, cy - r * 0.35), (cx + r * 0.45, cy - r * 1.0), (cx + r * 0.1, cy - r * 0.6)]):
+            pygame.draw.polygon(surf, (240, 70, 120), pts)
+        pygame.draw.line(surf, (200, 40, 90), (cx, cy - r * 0.75), (cx, cy - r * 0.1), max(1, int(r * 0.06)))
+    elif theme == "spring":                                       # ladybug
+        pygame.draw.circle(surf, (25, 25, 30), (cx, cy - r * 0.55), r * 0.32)
+        pygame.draw.circle(surf, (220, 30, 35), (cx, cy + r * 0.1), r * 0.72)
+        pygame.draw.line(surf, (25, 25, 30), (cx, cy - r * 0.6), (cx, cy + r * 0.8), max(1, int(r * 0.08)))
+        for dx, dy in ((-0.35, -0.1), (0.35, -0.1), (-0.3, 0.4), (0.3, 0.4), (-0.12, 0.15), (0.12, 0.15)):
+            pygame.draw.circle(surf, (25, 25, 30), (cx + dx * r, cy + dy * r), max(1, r * 0.11))
+        for ex in (-0.12, 0.12):
+            pygame.draw.circle(surf, (255, 255, 255), (cx + ex * r, cy - r * 0.62), max(1, r * 0.07))
+    else:
+        return False
+    return True
+
+
+def backdrop2(s, name, rng):
+    """The newer seasons' scenes behind the lobby and main menu."""
+    if name == "christmas":
+        s.blit(make_backdrop("winter"), (0, 0))
+        for x, h in ((105, 250), (1175, 250)):
+            draw_xmas_tree(s, x, 690 - h * 0.62, h * 0.52)
+        for x, box, rib in ((190, (200, 30, 40), (255, 215, 80)), (228, (40, 120, 200), (255, 255, 255)),
+                            (1060, (40, 150, 70), (220, 30, 40)), (1100, (230, 190, 60), (200, 30, 40))):
+            draw_gift(s, x, 675, 20, box, rib)
+        pts = [(x, 90 + 14 * math.sin(x / 70)) for x in range(0, W + 1, 20)]           # lights across the sky
+        pygame.draw.lines(s, (30, 50, 30), False, pts, 2)
+        for i, (x, y) in enumerate(pts[::2]):
+            pygame.draw.circle(s, [(255, 70, 70), (80, 220, 90), (255, 210, 60), (80, 160, 255)][i % 4], (x, y + 5), 4)
+    elif name == "stpatricks":
+        for k, rad in enumerate(range(260, 140, -20)):                                # a rainbow...
+            col = [(230, 50, 50), (245, 140, 40), (250, 220, 60), (70, 190, 80), (60, 130, 230), (140, 80, 200)][k]
+            pygame.draw.circle(s, (*col, 150), (1180, 720), rad, 20, draw_top_left=True, draw_top_right=True)
+        for y, col in ((650, (60, 160, 70, 240)), (675, (45, 140, 60, 245))):         # ...over green hills
+            pts = [(0, 720)] + [(x, y + 16 * math.sin(x / 130 + y)) for x in range(0, W + 1, 30)] + [(W, 720)]
+            pygame.draw.polygon(s, col, pts)
+        theme_icon2(s, "stpatricks", 960, 668, 34, True)                                # ...to a pot of gold
+        for x in range(40, W, 95):
+            draw_shamrock(s, x + rng.uniform(-20, 20), rng.uniform(690, 708), rng.uniform(9, 14), (90, 200, 90))
+    elif name == "anniversary":
+        for cx, cy, col in ((180, 150, (255, 210, 70)), (1100, 120, (220, 120, 255)), (980, 250, (90, 200, 255)),
+                            (300, 300, (255, 120, 120))):                             # fireworks
+            for i in range(18):
+                a = i / 18 * 2 * math.pi
+                pygame.draw.line(s, (*col, 120), (cx + math.cos(a) * 12, cy + math.sin(a) * 12),
+                                 (cx + math.cos(a) * 60, cy + math.sin(a) * 60), 3)
+                pygame.draw.circle(s, (*col, 170), (cx + math.cos(a) * 66, cy + math.sin(a) * 66), 3)
+        x = 1130                                                                      # a cake
+        for k, (w, h, col) in enumerate(((150, 50, (250, 235, 240)), (110, 42, (255, 200, 220)), (70, 36, (250, 235, 240)))):
+            y = 700 - sum((50, 42, 36)[:k + 1])
+            pygame.draw.rect(s, col, (x - w / 2, y, w, h), border_radius=8)
+            pygame.draw.rect(s, (150, 80, 200), (x - w / 2, y + h - 8, w, 8), border_radius=4)
+        for dx in (-20, 0, 20):
+            pygame.draw.rect(s, (120, 200, 255), (x + dx - 3, 548, 6, 24))
+            pygame.draw.ellipse(s, (255, 200, 60), (x + dx - 4, 534, 8, 14))
+        for i, (dx, dy, col) in enumerate(((-30, 520, (255, 90, 90)), (0, 490, (255, 210, 60)), (30, 520, (90, 200, 255)),
+                                            (-14, 470, (140, 230, 120)), (16, 465, (220, 120, 255)))):
+            pygame.draw.line(s, (230, 230, 230, 180), (95 + dx, dy + 24), (95, 690), 1)
+            draw_balloon(s, 95 + dx, dy, 20, col, string=False)
+        for x, box, rib in ((190, (120, 60, 190), (255, 210, 70)), (232, (255, 210, 70), (120, 60, 190))):
+            draw_gift(s, x, 675, 20, box, rib)
+    elif name == "fall":
+        pts = [(0, 720)] + [(x, 672 + 10 * math.sin(x / 90)) for x in range(0, W + 1, 30)] + [(W, 720)]
+        pygame.draw.polygon(s, (150, 100, 45, 240), pts)
+        for x, h, cols in ((70, 230, ((230, 100, 30), (200, 60, 30))), (185, 170, ((240, 170, 40), (225, 120, 30))),
+                           (1110, 180, ((200, 60, 30), (230, 100, 30))), (1215, 230, ((240, 170, 40), (200, 60, 30)))):
+            pygame.draw.rect(s, (90, 55, 30), (x - 8, 690 - h * 0.55, 16, h * 0.55))
+            for k in range(7):
+                ox, oy = rng.uniform(-0.5, 0.5) * h * 0.45, rng.uniform(-0.3, 0.2) * h * 0.4
+                pygame.draw.circle(s, cols[k % 2], (x + ox, 690 - h * 0.65 + oy), h * rng.uniform(0.16, 0.24))
+        for x in (330, 950):                                                          # hay bales and pumpkins
+            pygame.draw.rect(s, (220, 180, 90), (x - 34, 648, 68, 44), border_radius=8)
+            for dy in (660, 676):
+                pygame.draw.line(s, (180, 140, 60), (x - 30, dy), (x + 30, dy), 2)
+            pygame.draw.ellipse(s, (230, 120, 20), (x + 36, 666, 38, 28))
+            pygame.draw.rect(s, (90, 110, 40), (x + 53, 660, 5, 8))
+        for i in range(40):
+            draw_maple(s, rng.uniform(0, W), rng.uniform(690, 712), rng.uniform(5, 8), rng.choice(LEAF_COLS),
+                       rng.uniform(0, 6.3))
+    elif name == "spring":
+        pts = [(0, 720)] + [(x, 670 + 12 * math.sin(x / 100 + 2)) for x in range(0, W + 1, 30)] + [(W, 720)]
+        pygame.draw.polygon(s, (120, 200, 100, 240), pts)
+        for x, h in ((70, 220), (190, 160), (1100, 170), (1215, 220)):                # cherry blossom trees
+            pygame.draw.line(s, (100, 65, 50), (x, 690), (x, 690 - h * 0.55), 12)
+            pygame.draw.line(s, (100, 65, 50), (x, 690 - h * 0.4), (x + 30, 690 - h * 0.62), 6)
+            for k in range(9):
+                ox, oy = rng.uniform(-0.55, 0.55) * h * 0.45, rng.uniform(-0.35, 0.15) * h * 0.45
+                pygame.draw.circle(s, rng.choice([(255, 190, 215), (255, 215, 230), (250, 170, 200)]),
+                                   (x + ox, 690 - h * 0.66 + oy), h * rng.uniform(0.1, 0.16))
+        for x in range(250, 1040, 38):                                                # tulips
+            theme_icon2(s, "spring", x + rng.uniform(-8, 8), rng.uniform(678, 694), 12, False)
+    else:
+        return False
+    return True
+
+
+def corners2(s, name, y0):
+    if name == "christmas":
+        draw_wreath(s, 44, y0 + 44, 26)
+        draw_wreath(s, W - 44, y0 + 44, 26)
+    elif name == "stpatricks":
+        for cx, d in ((30, 1), (W - 30, -1)):
+            draw_shamrock(s, cx, y0 + 30, 22)
+            draw_shamrock(s, cx + d * 40, y0 + 18, 13, (70, 190, 90))
+            draw_shamrock(s, cx + d * 18, y0 + 66, 11, (70, 190, 90))
+    elif name == "anniversary":
+        for cx, d in ((34, 1), (W - 34, -1)):
+            for dx, dy, col in ((0, 40, (255, 210, 60)), (d * 30, 26, (220, 120, 255)), (d * 14, 64, (90, 200, 255))):
+                draw_balloon(s, cx + dx, y0 + dy, 14, col, string=False)
+    elif name == "fall":
+        for cx, d in ((24, 1), (W - 24, -1)):
+            for k, (dx, dy, r) in enumerate(((0, 30, 20), (d * 34, 14, 14), (d * 14, 62, 13), (d * 52, 40, 10))):
+                draw_maple(s, cx + dx, y0 + dy, r, LEAF_COLS[k], k * 0.8 * d)
+    elif name == "spring":
+        for x0, d in ((0, 1), (W, -1)):
+            pygame.draw.line(s, (100, 65, 50), (x0, y0 + 10), (x0 + d * 120, y0 + 40), 5)
+            pygame.draw.line(s, (100, 65, 50), (x0 + d * 60, y0 + 25), (x0 + d * 90, y0 + 70), 3)
+            for bx, by in ((40, 18), (80, 30), (118, 40), (92, 64), (60, 40)):
+                draw_blossom(s, x0 + d * bx, y0 + by, 9)
+    else:
+        return False
+    return True
+
+
+def new_extra2(name, e, y):
+    if name == "christmas":                  # Santa's sleigh flies across now and then
+        e.update(x=random.choice([-260.0, W + 260.0]), y=random.uniform(90, 230), vy=0.0)
+        e["vx"] = random.uniform(80, 120) * (1 if e["x"] < 0 else -1)
+    elif name == "stpatricks":               # gold coins tumbling down
+        e.update(y=-40.0 if y is None else y, vx=random.uniform(-10, 10), vy=random.uniform(40, 70))
+    elif name == "anniversary":              # balloons floating up
+        e.update(y=H + 60.0 if y is None else y, vx=random.uniform(-8, 8), vy=-random.uniform(30, 50),
+                 col=random.choice(CONFETTI_COLS))
+    elif name == "fall":                     # a V of geese heading south
+        e.update(x=random.choice([-160.0, W + 160.0]), y=random.uniform(80, 260), vy=0.0)
+        e["vx"] = random.uniform(55, 80) * (1 if e["x"] < 0 else -1)
+    elif name == "spring":                   # bees buzzing around
+        e.update(vx=random.uniform(-60, 60), vy=random.uniform(-30, 30))
+    else:
+        return None
+    return e
+
+
+def draw_extra2(surf, name, e, t):
+    x, y, s = e["x"], e["y"], e["s"]
+    d = 1 if e.get("vx", 0) >= 0 else -1
+    if name == "christmas":
+        yy = y + math.sin(t * 1.5 + e["ph"]) * 8
+        for k in range(3):                                    # reindeer
+            rx = x + d * (70 + k * 48)
+            ry = yy - 6 + math.sin(t * 6 + k) * 3
+            pygame.draw.ellipse(surf, (120, 75, 40), (rx - 16, ry - 7, 32, 14))
+            pygame.draw.circle(surf, (120, 75, 40), (rx + d * 16, ry - 10), 6)
+            for lx in (-10, 8):
+                pygame.draw.line(surf, (100, 60, 30), (rx + lx, ry + 5), (rx + lx + d * 6 * math.sin(t * 8 + k), ry + 15), 2)
+            pygame.draw.line(surf, (90, 60, 30), (rx + d * 16, ry - 15), (rx + d * 12, ry - 24), 2)
+            pygame.draw.line(surf, (90, 60, 30), (rx + d * 18, ry - 15), (rx + d * 24, ry - 23), 2)
+            if k == 2:
+                pygame.draw.circle(surf, (255, 40, 40), (rx + d * 22, ry - 9), 3)
+        pygame.draw.line(surf, (200, 170, 90), (x + d * 20, yy), (x + d * 150, yy - 4), 1)
+        pygame.draw.polygon(surf, (190, 25, 35), [(x - 30, yy - 12), (x + 26, yy - 12), (x + 32, yy + 6), (x - 26, yy + 6)])
+        pygame.draw.line(surf, (230, 190, 80), (x - 34, yy + 12), (x + 34, yy + 12), 3)
+        pygame.draw.circle(surf, (210, 30, 40), (x - 6 * d, yy - 20), 11)            # Santa
+        pygame.draw.circle(surf, (255, 225, 200), (x - 6 * d + d * 4, yy - 32), 6)
+        pygame.draw.circle(surf, (250, 250, 250), (x - 6 * d + d * 4, yy - 27), 5)
+        pygame.draw.polygon(surf, (210, 30, 40), [(x - 12 * d, yy - 36), (x + 2 * d, yy - 36), (x - 14 * d, yy - 46)])
+        pygame.draw.polygon(surf, (120, 60, 30), [(x - 26 * d, yy - 12), (x - 16 * d, yy - 12), (x - 22 * d, yy - 28)])
+        for k in range(6):                                   # sparkle trail
+            sx = x - d * (40 + k * 18)
+            pygame.draw.circle(surf, (255, 240, 170), (sx, yy + math.sin(t * 9 + k) * 5), max(1, 3 - k * 0.4))
+    elif name == "stpatricks":
+        w = max(2, int(28 * s * abs(math.cos(t * 3 + e["ph"]))))
+        coin = pygame.Surface((30, 30), pygame.SRCALPHA)
+        pygame.draw.circle(coin, (255, 205, 50), (15, 15), 14)
+        pygame.draw.circle(coin, (200, 150, 20), (15, 15), 14, 2)
+        pygame.draw.circle(coin, (230, 175, 30), (15, 15), 9, 2)
+        coin = pygame.transform.smoothscale(coin, (w, int(28 * s)))
+        surf.blit(coin, coin.get_rect(center=(x, y)))
+    elif name == "anniversary":
+        draw_balloon(surf, x + math.sin(t * 1.3 + e["ph"]) * 8, y, 16 * s, e["col"])
+    elif name == "fall":
+        for k, (dx, dy) in enumerate(((0, 0), (-1, -1), (-1, 1), (-2, -2), (-2, 2), (-3, -3), (-3, 3))):
+            gx, gy = x + d * dx * 26, y + dy * 16
+            flap = math.sin(t * 6 + k + e["ph"]) * 6
+            pygame.draw.lines(surf, (60, 55, 50), False, [(gx - 12, gy - flap), (gx - 4, gy - 3), (gx, gy),
+                                                          (gx + 4, gy - 3), (gx + 12, gy - flap)], 3)
+            pygame.draw.line(surf, (60, 55, 50), (gx, gy), (gx + d * 8, gy - 1), 3)
+    elif name == "spring":
+        flap = abs(math.sin(t * 30 + e["ph"]))
+        pygame.draw.ellipse(surf, (220, 235, 255), (x - 6 * s, y - 12 * s - flap * 3, 9 * s, 9 * s))
+        pygame.draw.ellipse(surf, (220, 235, 255), (x - 1 * s, y - 13 * s - flap * 3, 9 * s, 9 * s))
+        pygame.draw.ellipse(surf, (250, 200, 40), (x - 9 * s, y - 6 * s, 18 * s, 12 * s))
+        for k in (-3, 2):
+            pygame.draw.line(surf, (30, 25, 20), (x + k * s, y - 5 * s), (x + k * s, y + 5 * s), max(1, int(3 * s)))
+        pygame.draw.circle(surf, (30, 25, 20), (x + d * 9 * s, y), 3 * s)
+    else:
+        return False
+    return True
+
+
+def new_part2(name, p, y):
+    if name == "christmas":
+        p.update(vy=random.uniform(30, 90), vx=random.uniform(-15, 15))
+    elif name == "stpatricks":
+        p.update(vy=random.uniform(25, 50), vx=random.uniform(-10, 10), spin=random.uniform(-2, 2))
+    elif name == "anniversary":
+        p.update(vy=random.uniform(50, 110), vx=random.uniform(-20, 20), spin=random.uniform(-6, 6),
+                 col=random.choice(CONFETTI_COLS))
+    elif name == "fall":
+        p.update(vy=random.uniform(35, 70), vx=random.uniform(-20, 20), spin=random.uniform(-2.5, 2.5),
+                 col=random.choice(LEAF_COLS))
+    elif name == "spring":
+        p.update(vy=random.uniform(25, 55), vx=random.uniform(10, 35), spin=random.uniform(-3, 3),
+                 col=random.choice([(255, 190, 215), (255, 215, 230), (250, 170, 200), (255, 255, 255)]))
+    else:
+        return None
+    return p
+
+
+def draw_part2(surf, name, p, t):
+    x, y, s = p["x"], p["y"], p["s"]
+    if name == "christmas":
+        pygame.draw.circle(surf, (245, 250, 255), (x, y), 1.5 + 2.2 * s)
+    elif name == "stpatricks":
+        draw_shamrock(surf, x, y, 7 * s, (60, 190, 80))
+    elif name == "anniversary":
+        rot = t * p["spin"] + p["ph"]
+        w, h = 7 * s, 3.5 * s * abs(math.cos(rot))
+        pts = [(x + math.cos(rot) * w - math.sin(rot) * h, y + math.sin(rot) * w + math.cos(rot) * h),
+               (x - math.cos(rot) * w - math.sin(rot) * h, y - math.sin(rot) * w + math.cos(rot) * h),
+               (x - math.cos(rot) * w + math.sin(rot) * h, y - math.sin(rot) * w - math.cos(rot) * h),
+               (x + math.cos(rot) * w + math.sin(rot) * h, y + math.sin(rot) * w - math.cos(rot) * h)]
+        pygame.draw.polygon(surf, p["col"], pts)
+    elif name == "fall":
+        draw_maple(surf, x, y, 7 * s, p["col"], t * p["spin"] + p["ph"])
+    elif name == "spring":
+        rot = t * p["spin"] + p["ph"]
+        r = pygame.Rect(0, 0, 9 * s, max(2, 6 * s * abs(math.cos(rot))))
+        r.center = (x, y)
+        pygame.draw.ellipse(surf, p["col"], r)
+    else:
+        return False
+    return True
+
+
+def garland2(surf, name, y, t):
+    if name in ("stpatricks", "anniversary"):                # flags
+        cols = ([(40, 160, 70), (255, 255, 255), (255, 200, 60)] if name == "stpatricks"
+                else [(255, 210, 70), (130, 70, 200), (255, 255, 255), (230, 80, 130)])
+        pygame.draw.line(surf, (60, 50, 40), (0, y + 2), (W, y + 2), 2)
+        for i, x in enumerate(range(10, W, 44)):
+            pygame.draw.polygon(surf, cols[i % len(cols)], [(x, y + 2), (x + 34, y + 2), (x + 17, y + 26)])
+        if name == "anniversary":                           # and streamers
+            for i, x in enumerate(range(32, W, 132)):
+                pts = [(x + math.sin(t * 2 + i + k * 0.7) * 4, y + 4 + k * 6) for k in range(9)]
+                pygame.draw.lines(surf, CONFETTI_COLS[i % len(CONFETTI_COLS)], False, pts, 3)
+        return True
+    if name in ("fall", "spring"):                          # hanging leaves / flowers
+        pygame.draw.line(surf, (60, 50, 40), (0, y + 2), (W, y + 2), 2)
+        for i, x in enumerate(range(40, W, 80)):
+            cy = y + 14 + math.sin(t * 2 + i) * 2
+            pygame.draw.line(surf, (60, 50, 40), (x, y + 2), (x, cy - 6), 1)
+            if name == "fall":
+                draw_maple(surf, x, cy, 10, LEAF_COLS[i % 4], math.sin(t + i) * 0.3)
+            else:
+                draw_blossom(surf, x, cy, 9, [(255, 185, 210), (255, 255, 255), (255, 225, 120)][i % 3])
+        return True
+    return False
+
+
+THEME_SLOT_ICONS = {"xtree": ("christmas", True), "shamrock": ("stpatricks", False), "potofgold": ("stpatricks", True),
+                    "star": ("anniversary", False), "gift": ("anniversary", True), "leaf": ("fall", False),
+                    "acorn": ("fall", True), "tulip": ("spring", False), "ladybug": ("spring", True)}
+
+
+def theme_symbol2(s, kind, cx, cy, r):
+    """The newer seasons' slot symbols. Returns False for one it doesn't know."""
+    if kind == "xtree":                                        # the tree fills its square on the reel
+        draw_xmas_tree(s, cx, cy + r * 0.12, r * 1.05)
+    elif kind in THEME_SLOT_ICONS:
+        theme, alt = THEME_SLOT_ICONS[kind]
+        theme_icon2(s, theme, cx, cy, r, alt)
+    elif kind == "present":
+        draw_gift(s, cx, cy + r * 0.15, r, (200, 30, 40), (40, 150, 70))
+    elif kind == "mitten":
+        pygame.draw.ellipse(s, (60, 110, 200), (cx - r * 0.55, cy - r * 0.7, r * 1.1, r * 1.3))
+        pygame.draw.ellipse(s, (60, 110, 200), (cx - r * 0.85, cy - r * 0.3, r * 0.5, r * 0.7))
+        pygame.draw.rect(s, (245, 248, 255), (cx - r * 0.6, cy + r * 0.45, r * 1.2, r * 0.4), border_radius=int(r * 0.15))
+        for dx in (-0.2, 0.2):
+            pygame.draw.circle(s, (245, 248, 255), (cx + dx * r, cy - r * 0.15), r * 0.1)
+    elif kind == "horseshoe":
+        pygame.draw.arc(s, (150, 150, 165), (cx - r * 0.75, cy - r * 0.85, r * 1.5, r * 1.7), -0.35, math.pi + 0.35,
+                        int(r * 0.32))
+        for a in [math.pi * (0.1 + i * 0.2) for i in range(5)]:
+            pygame.draw.circle(s, (60, 60, 70), (cx + math.cos(a) * r * 0.6, cy - math.sin(a) * r * 0.7), r * 0.06)
+    elif kind == "cake":
+        pygame.draw.rect(s, (250, 235, 240), (cx - r * 0.8, cy - r * 0.15, r * 1.6, r * 0.9), border_radius=int(r * 0.12))
+        pygame.draw.rect(s, (255, 150, 190), (cx - r * 0.8, cy - r * 0.15, r * 1.6, r * 0.25), border_radius=int(r * 0.12))
+        pygame.draw.rect(s, (150, 80, 200), (cx - r * 0.8, cy + r * 0.55, r * 1.6, r * 0.2))
+        for dx in (-0.4, 0, 0.4):
+            pygame.draw.rect(s, (90, 180, 255), (cx + dx * r - r * 0.06, cy - r * 0.6, r * 0.12, r * 0.45))
+            pygame.draw.ellipse(s, (255, 190, 50), (cx + dx * r - r * 0.08, cy - r * 0.85, r * 0.16, r * 0.26))
+    elif kind == "apple":
+        pygame.draw.circle(s, (205, 30, 40), (cx - r * 0.28, cy + r * 0.1), r * 0.55)
+        pygame.draw.circle(s, (205, 30, 40), (cx + r * 0.28, cy + r * 0.1), r * 0.55)
+        pygame.draw.circle(s, (240, 110, 110), (cx - r * 0.4, cy - r * 0.1), r * 0.15)
+        pygame.draw.line(s, (90, 55, 25), (cx, cy - r * 0.35), (cx + r * 0.1, cy - r * 0.75), int(r * 0.12))
+        pygame.draw.ellipse(s, (70, 160, 60), (cx + r * 0.1, cy - r * 0.8, r * 0.45, r * 0.25))
+    elif kind == "blossom":
+        draw_blossom(s, cx, cy, r * 0.9)
+    else:
+        return False
+    return True
+
+
+def bomb2(surf, t, cx, cy, r):
+    if t == "winter":                                          # a jagged chunk of ice
+        pts = [(cx + math.cos(a) * r * (0.7 + 0.3 * ((i * 7) % 3) / 2), cy + math.sin(a) * r * (0.7 + 0.3 * ((i * 5) % 3) / 2))
+               for i, a in enumerate([i / 10 * 2 * math.pi for i in range(10)])]
+        pygame.draw.polygon(surf, (150, 205, 240), pts)
+        pygame.draw.polygon(surf, (70, 130, 190), pts, 3)
+        pygame.draw.lines(surf, (240, 250, 255), False, [(cx - r * 0.4, cy - r * 0.3), (cx, cy), (cx + r * 0.2, cy + r * 0.5)], 2)
+    elif t == "christmas":                                     # a lump of coal
+        pts = [(cx + math.cos(a) * r * (0.8 + 0.2 * math.sin(a * 3)), cy + math.sin(a) * r * (0.75 + 0.2 * math.cos(a * 2)))
+               for a in [i / 9 * 2 * math.pi for i in range(9)]]
+        pygame.draw.polygon(surf, (30, 30, 34), pts)
+        pygame.draw.circle(surf, (80, 80, 90), (cx - r * 0.3, cy - r * 0.3), r * 0.15)
+    elif t == "stpatricks":                                    # a storm cloud
+        for dx, dy, rr in ((-0.4, 0.1, 0.45), (0.1, -0.15, 0.55), (0.5, 0.1, 0.4), (0, 0.25, 0.45)):
+            pygame.draw.circle(surf, (80, 85, 100), (cx + dx * r, cy + dy * r), rr * r)
+        pygame.draw.polygon(surf, (255, 220, 60), [(cx, cy + r * 0.4), (cx - r * 0.25, cy + r * 0.95), (cx + r * 0.05, cy + r * 0.8),
+                                                   (cx - r * 0.1, cy + r * 1.3), (cx + r * 0.3, cy + r * 0.65), (cx + r * 0.05, cy + r * 0.7)])
+    elif t == "anniversary":                                   # a popped balloon
+        pygame.draw.polygon(surf, (200, 40, 50), [(cx - r * 0.3, cy - r * 0.2), (cx + r * 0.2, cy - r * 0.35),
+                                                  (cx + r * 0.35, cy + r * 0.1), (cx, cy + r * 0.3), (cx - r * 0.25, cy + r * 0.15)])
+        for i in range(8):
+            a = i / 8 * 2 * math.pi
+            pygame.draw.line(surf, (255, 210, 70), (cx + math.cos(a) * r * 0.55, cy + math.sin(a) * r * 0.55),
+                             (cx + math.cos(a) * r * 0.95, cy + math.sin(a) * r * 0.95), 3)
+    elif t == "fall":                                          # a rotten apple with a worm
+        pygame.draw.circle(surf, (110, 70, 40), (cx, cy + r * 0.1), r * 0.8)
+        pygame.draw.circle(surf, (80, 50, 30), (cx + r * 0.3, cy + r * 0.3), r * 0.2)
+        pts = [(cx + r * 0.3 + k * r * 0.12, cy + r * 0.3 - math.sin(k * 1.4) * r * 0.15) for k in range(5)]
+        pygame.draw.lines(surf, (240, 150, 170), False, pts, max(3, int(r * 0.18)))
+    elif t == "spring":                                        # a bee (it stings!)
+        for side in (-1, 1):
+            pygame.draw.ellipse(surf, (220, 235, 255), (cx + side * r * 0.1 - r * 0.3, cy - r * 0.95, r * 0.6, r * 0.6))
+        pygame.draw.ellipse(surf, (250, 200, 40), (cx - r * 0.8, cy - r * 0.5, r * 1.6, r))
+        for dx in (-0.25, 0.2):
+            pygame.draw.rect(surf, (30, 25, 20), (cx + dx * r - r * 0.1, cy - r * 0.48, r * 0.2, r * 0.96))
+        pygame.draw.polygon(surf, (30, 25, 20), [(cx + r * 0.75, cy - r * 0.1), (cx + r * 1.1, cy), (cx + r * 0.75, cy + r * 0.1)])
+    else:
+        return False
+    return True
+
+
+def costume2(surf, t, x, y, k, top):
+    if t == "christmas":                                       # Santa hat
+        pygame.draw.polygon(surf, (210, 30, 40), [(x - 13 * k, top), (x + 13 * k, top), (x + 18 * k, top - 22 * k)])
+        pygame.draw.rect(surf, (250, 250, 250), (x - 15 * k, top - 3 * k, 30 * k, 7 * k), border_radius=int(3 * k))
+        pygame.draw.circle(surf, (250, 250, 250), (x + 18 * k, top - 22 * k), 4 * k)
+    elif t == "stpatricks":                                    # leprechaun hat
+        pygame.draw.ellipse(surf, (20, 110, 50), (x - 18 * k, top - 5 * k, 36 * k, 8 * k))
+        pygame.draw.rect(surf, (25, 130, 60), (x - 10 * k, top - 22 * k, 20 * k, 19 * k))
+        pygame.draw.rect(surf, (25, 25, 25), (x - 10 * k, top - 9 * k, 20 * k, 4 * k))
+        pygame.draw.rect(surf, (255, 205, 50), (x - 3 * k, top - 10 * k, 6 * k, 6 * k), max(1, int(k)))
+    elif t == "anniversary":                                   # party hat
+        pygame.draw.polygon(surf, (130, 70, 200), [(x - 10 * k, top), (x + 10 * k, top), (x, top - 26 * k)])
+        for f in (0.3, 0.6):
+            pygame.draw.line(surf, (255, 210, 70), (x - 10 * k * (1 - f), top - 26 * k * f), (x + 10 * k * (1 - f), top - 26 * k * f),
+                             max(1, int(2 * k)))
+        pygame.draw.circle(surf, (255, 210, 70), (x, top - 26 * k), 4 * k)
+    elif t == "fall":                                          # a knitted scarf and a leaf
+        pygame.draw.rect(surf, (220, 110, 30), (x - 19 * k, y + 5 * k, 38 * k, 6 * k), border_radius=int(3 * k))
+        pygame.draw.rect(surf, (220, 110, 30), (x + 8 * k, y + 7 * k, 6 * k, 14 * k), border_radius=int(2 * k))
+        draw_maple(surf, x + 4 * k, top - 6 * k, 8 * k, (210, 60, 30), 0.4)
+    elif t == "spring":                                        # a flower crown
+        for i in range(5):
+            draw_blossom(surf, x - 14 * k + i * 7 * k, top - 2 * k - (3 * k if i in (1, 3) else 0), 4 * k,
+                         [(255, 185, 210), (255, 255, 255), (255, 225, 120)][i % 3])
+    else:
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -16954,6 +17748,8 @@ class CrashParty(MPGame):
         self.state = s
         if s["phase"] == "flying" and (prev != "flying" or abs(self.local_t - s["t"]) > 0.4):
             self.local_t = s["t"]
+        if self.app.scene != self.key:            # the rocket keeps flying while you're elsewhere - quietly
+            return
         if s["phase"] == "crashed" and prev == "flying":
             self.app.sfx("boom")
             self.app.effects.burst(*self.rocket_pos(), 40, [(255, 140, 40), (255, 230, 120), (220, 60, 40)])
@@ -17680,6 +18476,7 @@ class RelayHub:
         self.chan = RealtimeChannel(ROOM_PREFIX + code)
         self.links = {}
         self.out = {}
+        self.gone = set()             # players who left or were removed
         self.send_t = 0.0
 
     def new_links(self):
@@ -17687,7 +18484,7 @@ class RelayHub:
         new = []
         for f in self.chan.poll():
             cid, ms = str(f.get("f", ""))[:32], f.get("ms")
-            if f.get("to") != "host" or not cid or cid == "host" or not isinstance(ms, list):
+            if f.get("to") != "host" or not cid or cid == "host" or not isinstance(ms, list) or cid in self.gone:
                 continue
             link = self.links.get(cid)
             if link is None:
@@ -17706,6 +18503,7 @@ class RelayHub:
         self.send_t -= dt
         for cid in [c for c, link in self.links.items() if link.closed and c not in self.out]:
             self.links.pop(cid)
+            self.gone.add(cid)
         if self.out and self.send_t <= 0 and self.chan.joined:
             self.send_t = RELAY_SEND_EVERY
             self.chan.send({"f": "host", "b": self.out})
@@ -18662,6 +19460,54 @@ class Effects:
         self.flash = max(0.0, self.flash - dt * 1.4)
         self.fade = max(0.0, self.fade - dt * 3.5)
 
+    def draw_event(self, surf, title, sub, t, kind):
+        """The owner started a live event: a big purple-and-gold banner."""
+        which = kind.split(":", 1)[1]
+        col = {"double": (120, 240, 140), "rain": (140, 200, 255), "jackpot": GOLD}.get(which, GOLD)
+        slide = min(1.0, t * 3, (self.toast_len(kind) - t) * 4)
+        f_sub = font(16)
+        box = pygame.Rect(0, 0, max(640, min(W - 60, f_sub.size(sub)[0] + 170)), 116)
+        box.midtop = (W / 2, int(-130 + 196 * slide))
+        pygame.draw.rect(surf, (0, 0, 0), box.move(5, 6), border_radius=20)
+        panel = pygame.Surface(box.size, pygame.SRCALPHA)
+        for y in range(box.h):
+            pygame.draw.line(panel, lerp_col((70, 25, 110), (25, 10, 45), y / box.h), (0, y), (box.w, y))
+        sweep = (t * 420) % (box.w + 300) - 150                 # a shine sweeping across
+        shine = pygame.Surface(box.size, pygame.SRCALPHA)
+        pygame.draw.polygon(shine, (255, 255, 255, 40), [(sweep, 0), (sweep + 60, 0), (sweep - 10, box.h), (sweep - 70, box.h)])
+        panel.blit(shine, (0, 0))
+        m = pygame.Surface(box.size, pygame.SRCALPHA)
+        pygame.draw.rect(m, (255, 255, 255, 255), m.get_rect(), border_radius=20)
+        panel.blit(m, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+        surf.blit(panel, box)
+        pulse = 0.5 + 0.5 * math.sin(t * 8)
+        pygame.draw.rect(surf, lerp_col(GOLD, WHITE, pulse * 0.5), box, width=4, border_radius=20)
+        ex, ey = box.x + 62, box.centery                        # the event's emblem
+        for i in range(12):
+            a = i / 12 * 2 * math.pi + t * 1.5
+            pygame.draw.line(surf, col, (ex + math.cos(a) * 36, ey + math.sin(a) * 36),
+                             (ex + math.cos(a) * 46, ey + math.sin(a) * 46), 3)
+        pygame.draw.circle(surf, (25, 12, 40), (ex, ey), 34)
+        pygame.draw.circle(surf, col, (ex, ey), 34, 4)
+        if which == "double":
+            draw_text(surf, "2x", font(30, bold=True), col, (ex, ey))
+        elif which == "rain":
+            chip = self.app.assets.chip(100, 22)
+            surf.blit(chip, chip.get_rect(center=(ex, ey)))
+        else:
+            pygame.draw.polygon(surf, (150, 220, 255), [(ex - 20, ey - 6), (ex - 10, ey - 18), (ex + 10, ey - 18),
+                                                        (ex + 20, ey - 6), (ex, ey + 20)])
+            pygame.draw.polygon(surf, (230, 250, 255), [(ex - 10, ey - 18), (ex + 10, ey - 18), (ex + 4, ey - 6), (ex - 4, ey - 6)])
+        for i in range(6):                                      # twinkles around the banner
+            a = t * 2 + i
+            sx = box.x + 20 + (i * 197 + int(t * 60)) % (box.w - 40)
+            sy = box.y + (6 if i % 2 else box.h - 6)
+            r = 3 + 3 * abs(math.sin(a * 2))
+            pygame.draw.polygon(surf, (255, 240, 170), star_points(sx, sy, r * 1.6, r * 0.5, 4))
+        draw_text(surf, "LIVE EVENT", font(13, bold=True), col, (box.x + 116, box.y + 22), anchor="midleft")
+        draw_text(surf, title, font(28, bold=True), WHITE, (box.x + 116, box.y + 54), anchor="midleft", shadow=(0, 0, 0))
+        draw_text(surf, sub, f_sub, (235, 225, 245), (box.x + 116, box.y + 88), anchor="midleft")
+
     def draw(self, surf):
         for c in self.chips:
             w = max(2, int(40 * abs(math.cos(c["spin"]))))
@@ -18679,7 +19525,9 @@ class Effects:
                        (x, y + s * 2), (x - s * 0.45, y + s * 0.45), (x - s * 2, y), (x - s * 0.45, y - s * 0.45)]
                 pygame.draw.polygon(self.fx, (*p["col"], int(255 * k)), pts)
             surf.blit(self.fx, (0, 0))
-        if self.toasts and self.toasts[0][3]:
+        if self.toasts and str(self.toasts[0][3]).startswith("event:"):
+            self.draw_event(surf, *self.toasts[0])
+        elif self.toasts and self.toasts[0][3]:
             title, sub, t, kind = self.toasts[0]
             slide = min(1.0, t * 4, (self.toast_len(kind) - t) * 4)
             col = UP_COL if kind == "up" else DOWN_COL
@@ -19262,6 +20110,7 @@ HELP = {
         ("b", "Type your name, then one person presses HOST A GAME. Their screen shows a 5-letter ROOM CODE."),
         ("b", "Everyone else opens MULTIPLAYER, types the room code and presses JOIN."),
         ("b", "The host has to keep their game open - if they stop hosting, everyone is disconnected."),
+        ("b", "The host can KICK a player from the list of players. They can't come back into that game."),
         ("b", "On the same Wi-Fi (downloaded game only) you don't even need the code: the host's game shows up "
               "in the list. Windows may ask the host if the game can use the network - click Allow."),
         ("h", "What you can do together"),
@@ -20460,7 +21309,7 @@ class App:
             if self.net_server:
                 self.net_server.update(dt)
             if self.net and not self.net.update(dt):
-                self.leave_game(getattr(self.net.link, "why", "") or "Lost the connection to the game host")
+                self.leave_game(self.net.why or getattr(self.net.link, "why", "") or "Lost the connection to the game host")
             for ev in self.market.pop_alerts():
                 self.effects.toast(ev["title"], ev["sub"], ev["kind"])
                 self.sfx("alert")
