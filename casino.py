@@ -2627,7 +2627,7 @@ class Slots:
         if ev and ev.active("jackpot"):
             left = int(ev.left("jackpot"))
             glow = 0.5 + 0.5 * math.sin(self.t * 6)
-            draw_pill(surf, f"JACKPOT EVENT  {left // 60}:{left % 60:02d}  -  3 DIAMONDS IN THE MIDDLE PAYS {JACKPOT_PAY}x!",
+            draw_pill(surf, f"JACKPOT EVENT  {clock(left)}  -  3 DIAMONDS IN THE MIDDLE PAYS {JACKPOT_PAY}x!",
                       font(17, bold=True), (641, 78), (30, 20, 0), (*lerp_col(GOLD, (255, 255, 255), glow * 0.4), 240),
                       (255, 255, 255), pad=(16, 4))
         self.app.draw_top_bar(surf, "SLOTS", lobby=True, lobby_enabled=self.can_leave())
@@ -15231,9 +15231,20 @@ class AccountScreen:
 EVENT_KINDS = ["double", "rain", "jackpot"]
 EVENT_NAMES = {"double": "DOUBLE PAYOUTS", "rain": "CHIP RAIN", "jackpot": "JACKPOT"}
 EVENT_INFO = {"double": "Every win pays double!", "rain": "Click the falling chips to grab them!",
-              "jackpot": "Three diamonds on the middle line of the slots pays 250x!"}
-JACKPOT_SECONDS = 3 * 60 + 3
-JACKPOT_PAY = 250
+              "jackpot": "Three diamonds on the middle line of the slots pays 500x your bet!"}
+JACKPOT_SECONDS = 3 * 60 + 3    # exactly as long as the Jackpot song
+JACKPOT_PAY = 500
+EVENT_MAX = 365 * 86400          # the longest an event can run (1 year)
+
+
+def clock(secs):
+    """How long is left: 3:05, 1:02:03 or 2d 01:02:03."""
+    d, rest = divmod(max(0, int(secs)), 86400)
+    h, rest = divmod(rest, 3600)
+    m, s = divmod(rest, 60)
+    if d:
+        return f"{d}d {h:02d}:{m:02d}:{s:02d}"
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 JACKPOT_CHANCE = 0.015           # during Jackpot, this share of slot spins land three diamonds in the middle
 EVENT_POLL = 15.0                # seconds between checks for the owner's switches
 RAIN_VALUES = [10, 25, 50, 100, 250, 500, 1000]
@@ -15388,7 +15399,7 @@ class LiveEvents:
 
     def started(self, kind):
         left = int(self.left(kind))
-        self.app.effects.toast(f"{EVENT_NAMES[kind]}!", f"{EVENT_INFO[kind]}  ({left // 60}:{left % 60:02d})",
+        self.app.effects.toast(f"{EVENT_NAMES[kind]}!", f"{EVENT_INFO[kind]}  ({clock(left)})",
                                "event:" + kind)
         self.app.sfx("alert")
 
@@ -15417,7 +15428,7 @@ class LiveEvents:
         on = [k for k in EVENT_KINDS if self.active(k)]
         for i, k in enumerate(on):
             left = int(self.left(k))
-            text = f"{EVENT_NAMES[k]}  {left // 60}:{left % 60:02d}"
+            text = f"{EVENT_NAMES[k]}  {clock(left)}"
             col = {"double": (120, 240, 140), "rain": (140, 200, 255), "jackpot": GOLD}[k]
             glow = 0.5 + 0.5 * math.sin(self.t * 5 + i)
             draw_pill(surf, text, font(14, bold=True), (W - 140, 76 + i * 30), (20, 15, 5) if k == "jackpot" else WHITE,
@@ -15936,7 +15947,8 @@ class OwnerMenu:
         self.tab = "events"
         self.focus = None            # which box is being typed in: "money", "search" or "amount"
         self.money_text = ""
-        self.minutes = {"double": 10, "rain": 5}
+        self.dur = {"double": {"d": "", "h": "", "m": "10", "s": ""},      # typed event lengths
+                    "rain": {"d": "", "h": "", "m": "5", "s": ""}}
         P = self.PANEL
         self.tab_btns = [(Button((P.x + 40 + i * 214, P.y + 84, 204, 44), label, (60, 50, 90), 16), key)
                          for i, (key, label) in enumerate((("events", "CHIPS & EVENTS"), ("themes", "THEMES"),
@@ -15949,10 +15961,9 @@ class OwnerMenu:
         self.rows = {}
         for i, k in enumerate(EVENT_KINDS):
             y = P.y + 300 + i * 74
-            self.rows[k] = {"minus": Button((P.x + 330, y, 44, 48), "-", (60, 60, 90), 22),
-                            "plus": Button((P.x + 470, y, 44, 48), "+", (60, 60, 90), 22),
-                            "start": Button((P.x + 540, y, 150, 48), "START", (25, 120, 60), 18),
-                            "stop": Button((P.x + 700, y, 110, 48), "STOP", (150, 35, 40), 18), "y": y}
+            self.rows[k] = {"boxes": {u: pygame.Rect(P.x + 250 + j * 78, y, 70, 48) for j, u in enumerate("dhms")},
+                            "start": Button((P.x + 580, y, 150, 48), "START", (25, 120, 60), 18),
+                            "stop": Button((P.x + 740, y, 110, 48), "STOP", (150, 35, 40), 18), "y": y}
         # THEMES: one dropdown for everyone, one just for me
         self.drop = None             # the dropdown that's open: "everyone" or "me"
         self.drop_boxes = {"everyone": pygame.Rect(P.x + 190, P.y + 176, 400, 54),
@@ -16017,6 +16028,19 @@ class OwnerMenu:
                 self.drop = None
             elif e.key in (pygame.K_BACKQUOTE, pygame.K_ESCAPE):
                 self.active = False
+            elif isinstance(self.focus, tuple):             # a day / hour / minute / second box
+                _, k, u = self.focus
+                text = self.dur[k][u]
+                if e.key == pygame.K_BACKSPACE:
+                    self.dur[k][u] = text[:-1]
+                elif e.key == pygame.K_TAB:                 # on to the next box
+                    order = [(kk, uu) for kk in self.dur for uu in "dhms"]
+                    i = (order.index((k, u)) + 1) % len(order)
+                    self.focus = ("dur",) + order[i]
+                elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                    self.focus = None
+                elif e.unicode and e.unicode.isdigit() and len(text) < 3:
+                    self.dur[k][u] = str(int(text + e.unicode))
             elif self.focus:
                 text = {"money": self.money_text, "search": self.search, "amount": self.amount}[self.focus]
                 if e.key == pygame.K_BACKSPACE:
@@ -16075,13 +16099,12 @@ class OwnerMenu:
                     app.save()
                     ev.owner_msg = f"YOUR CHIPS: {money(app.balance)}"
             for k, row in self.rows.items():
-                if k in self.minutes:
-                    if row["minus"].clicked(pos):
-                        self.minutes[k] = max(1, self.minutes[k] - (5 if self.minutes[k] > 5 else 1))
-                    elif row["plus"].clicked(pos):
-                        self.minutes[k] = min(240, self.minutes[k] + (5 if self.minutes[k] >= 5 else 1))
-                secs = JACKPOT_SECONDS if k == "jackpot" else self.minutes[k] * 60
-                if row["start"].clicked(pos, not busy):
+                if k in self.dur:
+                    for u, box in row["boxes"].items():
+                        if box.collidepoint(pos):
+                            self.focus = ("dur", k, u)
+                secs = self.seconds(k)
+                if row["start"].clicked(pos, not busy and secs > 0):
                     ev.owner_action("casino_owner_event", {"which": k, "seconds": secs},
                                     f"{EVENT_NAMES[k]} STARTED FOR EVERYONE")
                 elif row["stop"].clicked(pos, not busy):
@@ -16110,6 +16133,14 @@ class OwnerMenu:
                         self.pick, self.amount = name, ""
                         self.focus = "amount"
                         return
+
+    def seconds(self, k):
+        """How long this event runs, from its day / hour / minute / second boxes (Jackpot is always 3:03)."""
+        if k not in self.dur:
+            return JACKPOT_SECONDS
+        d = self.dur[k]
+        total = sum(int(d[u] or 0) * mult for u, mult in (("d", 86400), ("h", 3600), ("m", 60), ("s", 1)))
+        return min(EVENT_MAX, total)
 
     def options(self, which):
         """The open dropdown's choices, laid out in three columns under its box."""
@@ -16185,20 +16216,27 @@ class OwnerMenu:
             for b, _ in self.btn_quick:
                 b.draw(surf, mouse)
             draw_text(surf, "EVENTS  (FOR EVERYONE)", font(16, bold=True), GOLD, (P.x + 40, P.y + 272), anchor="midleft")
+            draw_text(surf, "how long:  days  hours  minutes  seconds", font(13), (160, 150, 180), (P.x + 250, P.y + 272),
+                      anchor="midleft")
             for k, row in self.rows.items():
                 y = row["y"]
                 on = ev.active(k)
                 draw_text(surf, EVENT_NAMES[k], font(18, bold=True), WHITE, (P.x + 40, y + 16), anchor="midleft")
                 left = int(ev.left(k))
-                draw_text(surf, f"ON  {left // 60}:{left % 60:02d}" if on else "off", font(13, bold=True),
+                draw_text(surf, f"ON  {clock(left)}" if on else "off", font(13, bold=True),
                           (120, 240, 140) if on else (150, 140, 160), (P.x + 40, y + 38), anchor="midleft")
-                if k in self.minutes:
-                    row["minus"].draw(surf, mouse)
-                    row["plus"].draw(surf, mouse)
-                    draw_text(surf, f"{self.minutes[k]} MIN", font(18, bold=True), WHITE, (P.x + 422, y + 24))
+                if k in self.dur:
+                    for u, box in row["boxes"].items():
+                        focused = self.focus == ("dur", k, u)
+                        pygame.draw.rect(surf, (6, 6, 12), box, border_radius=9)
+                        pygame.draw.rect(surf, GOLD if focused else (100, 90, 120), box, width=2, border_radius=9)
+                        text = self.dur[k][u] + ("|" if focused and int(time.time() * 2) % 2 == 0 else "")
+                        draw_text(surf, text or "0", font(20, bold=True), WHITE if self.dur[k][u] or focused else
+                                  (110, 105, 130), (box.x + 10, box.centery), anchor="midleft")
+                        draw_text(surf, u, font(15, bold=True), GOLD, (box.right - 10, box.centery), anchor="midright")
                 else:
-                    draw_text(surf, "3:03 + SONG", font(16, bold=True), GOLD, (P.x + 422, y + 24))
-                row["start"].draw(surf, mouse, not busy)
+                    draw_text(surf, "3:03 WITH THE SONG", font(16, bold=True), GOLD, (P.x + 405, y + 24))
+                row["start"].draw(surf, mouse, not busy and self.seconds(k) > 0)
                 row["stop"].draw(surf, mouse, not busy and on)
         elif self.tab == "themes":
             mine_theme, mine_text = self.mine_label()
