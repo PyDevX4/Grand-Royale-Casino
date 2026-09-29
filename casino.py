@@ -18,9 +18,9 @@ from collections import deque
 
 import pygame
 
-# The browser version (built with pygbag) runs under Emscripten. A browser tab can't open network
-# connections to friends or replace its own program, so multiplayer and auto-updates are switched off
-# there - the web page always serves the newest version anyway.
+# The browser version (built with pygbag) runs under Emscripten. A browser tab can't take connections from
+# friends on the Wi-Fi or replace its own program, so it plays multiplayer with room codes only, and has no
+# auto-updates - the web page always serves the newest version anyway.
 WEB = sys.platform == "emscripten"
 try:
     import socket
@@ -12274,11 +12274,21 @@ class BJTable:
 
 # ---- the host's server ------------------------------------------------------
 class NetServer:
-    def __init__(self, host_name):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind((NET_BIND, NET_PORT))
-        self.sock.listen(8)
-        self.sock.setblocking(False)
+    def __init__(self, host_name, lan=True, room=None):
+        self.sock = None
+        if lan:                               # friends on the same Wi-Fi connect straight to this computer
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.bind((NET_BIND, NET_PORT))
+                self.sock.listen(8)
+                self.sock.setblocking(False)
+            except OSError:
+                if self.sock:
+                    self.sock.close()
+                self.sock = None
+                if not room:
+                    raise
+        self.relay = RelayHub(room) if room else None      # friends anywhere come in through the room code
         self.name = host_name
         self.clients = {}
         self.next_id = 1
@@ -12290,6 +12300,8 @@ class NetServer:
         self.beacon_t = 0.0
         self.beacon = None
         try:
+            if not self.sock:
+                raise OSError("no Wi-Fi hosting")
             self.beacon = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.beacon.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self.beacon.setblocking(False)
@@ -12305,23 +12317,29 @@ class NetServer:
         for c in self.clients.values():
             c["link"].send(msg)
 
+    def add_client(self, link):
+        if len(self.clients) >= NET_MAX_PLAYERS:
+            link.send({"t": "full"})
+            link.flush()
+            link.close()
+            return None
+        pid = self.next_id
+        self.next_id += 1
+        self.clients[pid] = {"link": link, "name": f"Player {pid}", "scene": "menu", "balance": 0, "bet": 0}
+        return pid
+
     def update(self, dt):
-        while True:
+        while self.sock:
             try:
                 sock, _ = self.sock.accept()
             except (BlockingIOError, InterruptedError):
                 break
             except OSError:
                 break
-            link = NetLink(sock)
-            if len(self.clients) >= NET_MAX_PLAYERS:
-                link.send({"t": "full"})
-                link.flush()
-                link.close()
-                continue
-            pid = self.next_id
-            self.next_id += 1
-            self.clients[pid] = {"link": link, "name": f"Player {pid}", "scene": "menu", "balance": 0, "bet": 0}
+            self.add_client(NetLink(sock))
+        if self.relay:
+            for link in self.relay.new_links():
+                self.add_client(link)
         for pid, c in list(self.clients.items()):
             for m in c["link"].read():
                 self.on_msg(pid, c, m)
@@ -12350,6 +12368,8 @@ class NetServer:
                     continue
         for c in self.clients.values():
             c["link"].flush()
+        if self.relay:
+            self.relay.flush(dt)
 
     def on_msg(self, pid, c, m):
         t = str(m.get("t", ""))
@@ -12406,6 +12426,8 @@ class NetServer:
             c["link"].flush()
             c["link"].close()
         self.clients = {}
+        if self.relay:
+            self.relay.close()
         for s in (self.sock, self.beacon):
             try:
                 if s:
@@ -12416,11 +12438,11 @@ class NetServer:
 
 # ---- every player's connection (the host connects to itself too) -----------
 class NetClient:
-    def __init__(self, app, addr, name):
+    def __init__(self, app, addr, name, link=None):
         self.app = app
         self.addr = addr
-        sock = socket.create_connection((addr, NET_PORT), timeout=3)
-        self.link = NetLink(sock)
+        self.link = link or NetLink(socket.create_connection((addr, NET_PORT), timeout=3))
+        self.room = link.code if isinstance(link, RelayClientLink) else ""
         self.id = None
         self.name = name
         self.host_name = ""
@@ -12443,7 +12465,7 @@ class NetClient:
             self.on_msg(m)
         self.status_t -= dt
         if self.status_t <= 0:
-            self.status_t = 0.4
+            self.status_t = 1.0 if self.room else 0.4          # room codes: fewer messages over the internet
             self.send({"t": "status", "scene": self.app.scene, "balance": int(self.app.balance),
                        "bet": self.app.live_bet()})
         self.link.flush()
@@ -13035,15 +13057,18 @@ class Online:
         self.bg = gradient_bg((20, 30, 60), (6, 8, 18))
         self.name = app.player_name
         self.addr = ""
-        self.focus = None             # "name" or "addr"
+        self.code = ""
+        self.focus = None             # "name", "code" or "addr"
         self.found = {}               # ip -> (host name, players, last seen)
         self.finder = None
         self.error = ""
         self.t = 0.0
         self.name_box = pygame.Rect(90, 170, 440, 52)
-        self.addr_box = pygame.Rect(690, 520, 330, 52)
-        self.btn_host = Button((90, 250, 440, 70), "HOST A GAME", (25, 120, 60), 26, "FRIENDS ON YOUR WI-FI JOIN YOU")
-        self.btn_join_addr = Button((1030, 520, 160, 52), "JOIN", (40, 90, 160), 22)
+        self.code_box = pygame.Rect(650, 170, 330, 60)
+        self.addr_box = pygame.Rect(690, 530, 330, 52)
+        self.btn_host = Button((90, 250, 440, 70), "HOST A GAME", (25, 120, 60), 26, "YOU GET A ROOM CODE FOR FRIENDS")
+        self.btn_join_code = Button((990, 170, 200, 60), "JOIN", (25, 120, 60), 24)
+        self.btn_join_addr = Button((1030, 530, 160, 52), "JOIN", (40, 90, 160), 22)
         self.btn_leave = Button((90, 560, 440, 60), "LEAVE", (150, 35, 40), 24)
         self.join_btns = []
 
@@ -13061,7 +13086,7 @@ class Online:
         self.focus = None
 
     def start_finder(self):
-        if self.finder:
+        if self.finder or WEB or not socket:
             return
         try:
             f = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -13086,28 +13111,42 @@ class Online:
         if not self.error:
             self.stop_finder()
 
+    def join_code(self):
+        self.app.player_name = self.name = clean_name(self.name)
+        self.error = self.app.join_room(self.code) or ""
+        if not self.error:
+            self.stop_finder()
+
     def handle(self, e):
         app = self.app
         if e.type == pygame.KEYDOWN and self.focus:
-            text = self.name if self.focus == "name" else self.addr
+            text = {"name": self.name, "code": self.code, "addr": self.addr}[self.focus]
             if e.key == pygame.K_BACKSPACE:
                 text = text[:-1]
             elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 if self.focus == "addr" and self.addr.strip():
                     self.join(self.addr.strip())
+                elif self.focus == "code" and len(self.code) == ROOM_LEN:
+                    self.join_code()
                 self.focus = None
                 return
             elif e.key == pygame.K_TAB:
-                self.focus = "addr" if self.focus == "name" else "name"
+                self.focus = "code" if self.focus == "name" else "name"
                 return
             elif e.unicode and e.unicode.isprintable():
-                ok = (e.unicode.isalnum() or e.unicode in " _-.") if self.focus == "name" else \
-                    (e.unicode.isalnum() or e.unicode in ".-:")
-                if ok and len(text) < (NAME_MAX if self.focus == "name" else 40):
+                if self.focus == "name":
+                    if (e.unicode.isalnum() or e.unicode in " _-.") and len(text) < NAME_MAX:
+                        text += e.unicode
+                elif self.focus == "code":
+                    if e.unicode.isalnum() and len(text) < ROOM_LEN:
+                        text += e.unicode.upper()
+                elif (e.unicode.isalnum() or e.unicode in ".-:") and len(text) < 40:
                     text += e.unicode
             if self.focus == "name":
                 self.name = text
                 app.player_name = clean_name(text)
+            elif self.focus == "code":
+                self.code = text
             else:
                 self.addr = text
         elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
@@ -13118,14 +13157,18 @@ class Online:
                 return
             if self.name_box.collidepoint(e.pos):
                 self.focus = "name"
-            elif self.addr_box.collidepoint(e.pos):
+            elif self.code_box.collidepoint(e.pos):
+                self.focus = "code"
+            elif self.addr_box.collidepoint(e.pos) and not WEB:
                 self.focus = "addr"
             elif self.btn_host.clicked(e.pos):
                 self.app.player_name = self.name = clean_name(self.name)
                 self.error = app.host_game() or ""
                 if not self.error:
                     self.stop_finder()
-            elif self.btn_join_addr.clicked(e.pos, bool(self.addr.strip())):
+            elif self.btn_join_code.clicked(e.pos, len(self.code) == ROOM_LEN):
+                self.join_code()
+            elif not WEB and self.btn_join_addr.clicked(e.pos, bool(self.addr.strip())):
                 self.join(self.addr.strip())
             else:
                 for ip, b in self.join_btns:
@@ -13155,14 +13198,38 @@ class Online:
         now = time.time()
         self.found = {ip: v for ip, v in self.found.items() if now - v[2] < 4}
 
-    def text_box(self, surf, rect, text, focused, placeholder):
+    def text_box(self, surf, rect, text, focused, placeholder, size=22):
         pygame.draw.rect(surf, (6, 8, 16), rect, border_radius=10)
         pygame.draw.rect(surf, GOLD if focused else (90, 100, 140), rect, width=2, border_radius=10)
         shown = text + ("|" if focused and int(self.t * 2) % 2 == 0 else "")
         if text or focused:
-            draw_text(surf, shown, font(22, bold=True), WHITE, (rect.x + 16, rect.centery), anchor="midleft")
+            draw_text(surf, shown, font(size, bold=True), WHITE, (rect.x + 16, rect.centery), anchor="midleft")
         else:
             draw_text(surf, placeholder, font(18), (110, 115, 140), (rect.x + 16, rect.centery), anchor="midleft")
+
+    def draw_hosting(self, surf, left):
+        app = self.app
+        code = app.room_code()
+        status = app.net_server.relay.status() if app.net_server.relay else "off"
+        draw_text(surf, "YOU'RE HOSTING!", font(28, bold=True), GOLD, (left.centerx, 118))
+        y = 160
+        if code:
+            draw_text(surf, "Friends anywhere type this ROOM CODE", font(15), (210, 215, 235), (left.centerx, y))
+            draw_text(surf, "on their MULTIPLAYER screen:", font(15), (210, 215, 235), (left.centerx, y + 22))
+            ok = status == "online"
+            spaced = "  ".join(code)
+            draw_pill(surf, spaced, font(46, bold=True), (left.centerx, y + 82), WHITE if ok else (150, 150, 160),
+                      (0, 0, 0, 210), GOLD if ok else (90, 90, 100), pad=(26, 8))
+            note, col = {"online": ("READY - FRIENDS CAN JOIN FROM ANYWHERE", (120, 230, 140)),
+                         "connecting": ("CONNECTING" + "." * (int(self.t * 2) % 4), (230, 210, 140)),
+                         "failed": ("ROOM CODES AREN'T WORKING RIGHT NOW (NO INTERNET?)", (240, 130, 120))}[status]
+            draw_text(surf, note, font(13, bold=True), col, (left.centerx, y + 136))
+            y += 170
+        if app.host_ip:
+            draw_text(surf, "On the same Wi-Fi they can also pick your game", font(14), (170, 180, 210), (left.centerx, y))
+            draw_text(surf, f"from their list, or type  {app.host_ip}", font(14), (170, 180, 210), (left.centerx, y + 20))
+            y += 50
+        return y
 
     def draw(self, surf):
         mouse = pygame.mouse.get_pos()
@@ -13173,26 +13240,30 @@ class Online:
             left = pygame.Rect(60, 80, 500, 560)
             soft_panel(surf, left, 150, (90, 110, 190))
             if app.net_server:
-                draw_text(surf, "YOU'RE HOSTING!", font(28, bold=True), GOLD, (left.centerx, 120))
-                draw_text(surf, "Friends on the same Wi-Fi can join by opening", font(15), (210, 215, 235),
-                          (left.centerx, 165))
-                draw_text(surf, "MULTIPLAYER - your game shows up in their list.", font(15), (210, 215, 235),
-                          (left.centerx, 187))
-                draw_text(surf, "Or they can type this address:", font(15), (210, 215, 235), (left.centerx, 225))
-                draw_pill(surf, app.host_ip, font(34, bold=True), (left.centerx, 275), WHITE, (0, 0, 0, 200), GOLD,
-                          pad=(24, 8))
+                y = self.draw_hosting(surf, left)
                 self.btn_leave.text = "STOP HOSTING"
                 self.btn_leave.hint = "EVERYONE GETS DISCONNECTED"
+            elif net.id is None:
+                y = 200
+                dots = "." * (int(self.t * 2) % 4)
+                draw_text(surf, "CONNECTING" + dots, font(28, bold=True), GOLD, (left.centerx, 120))
+                where = f"Looking for room {net.room}" if net.room else f"Connecting to {net.addr}"
+                draw_text(surf, where, font(18), (210, 215, 235), (left.centerx, 165))
+                self.btn_leave.text = "CANCEL"
+                self.btn_leave.hint = None
             else:
                 draw_text(surf, "CONNECTED!", font(28, bold=True), GOLD, (left.centerx, 120))
                 draw_text(surf, f"You joined {net.host_name}'s game", font(18), (210, 215, 235), (left.centerx, 165))
-                draw_text(surf, f"at {net.addr}", font(15), (160, 170, 200), (left.centerx, 192))
+                where = f"room code {net.room}" if net.room else f"at {net.addr}"
+                draw_text(surf, where, font(15), (160, 170, 200), (left.centerx, 192))
+                y = 230
                 self.btn_leave.text = "LEAVE GAME"
                 self.btn_leave.hint = None
-            tips = ["POKER - friends replace the computer players.", "BLACKJACK - everyone plays at one table.",
-                    "Every other game - see who's there, their bets", "and whether they won or lost."]
+            tips = ["PARTY - four games made for playing together.", "POKER - friends replace the computer players.",
+                    "BLACKJACK - everyone plays at one table.", "Every other game - see who's there and how they do."]
+            y = max(y + 10, 370)
             for i, tip in enumerate(tips):
-                draw_text(surf, tip, font(15, bold=i < 2), (190, 220, 200), (left.x + 40, 350 + i * 28), anchor="midleft")
+                draw_text(surf, tip, font(14, bold=i < 3), (190, 220, 200), (left.x + 36, y + i * 26), anchor="midleft")
             self.btn_leave.draw(surf, mouse)
             right = pygame.Rect(600, 80, 620, 560)
             soft_panel(surf, right, 150, (90, 110, 190))
@@ -13212,7 +13283,7 @@ class Online:
                           anchor="midleft")
                 draw_text(surf, money(p["balance"]), font(18, bold=True), (120, 230, 140), (row.right - 16, row.centery),
                           anchor="midright")
-            if len(net.players) < 2:
+            if len(net.players) < 2 and net.id is not None:
                 draw_text(surf, "Waiting for friends to join...", font(16), (170, 180, 210), (right.centerx, 600))
         else:
             left = pygame.Rect(60, 80, 530, 560)
@@ -13221,34 +13292,46 @@ class Online:
             draw_text(surf, "YOUR NAME", font(14, bold=True), (190, 200, 230), (self.name_box.x, 156), anchor="midleft")
             self.text_box(surf, self.name_box, self.name, self.focus == "name", "click to type your name")
             self.btn_host.draw(surf, mouse)
-            lines = ["Everyone needs this game on their own computer,", "and you all need to be on the same Wi-Fi.",
-                     "", "The first time you host, Windows may ask if Python", "can use the network - click ALLOW",
-                     "(private networks only).", "", "No accounts or sign-ups needed."]
+            lines = ["Hosting gives you a ROOM CODE. Friends type it in", "on their MULTIPLAYER screen - from anywhere,",
+                     "on the downloaded game or the web version.", "",
+                     "Your computer runs the tables, so keep the", "game open while friends are playing."]
+            if not WEB:
+                lines += ["", "Windows may ask if the game can use the network", "- click ALLOW (private networks)."]
             for i, ln in enumerate(lines):
-                draw_text(surf, ln, font(15), (190, 200, 225), (left.centerx, 360 + i * 26))
+                draw_text(surf, ln, font(15), (190, 200, 225), (left.centerx, 360 + i * 24))
             right = pygame.Rect(620, 80, 600, 560)
             soft_panel(surf, right, 150, (90, 110, 190))
-            draw_text(surf, "GAMES ON YOUR WI-FI", font(22, bold=True), GOLD, (right.centerx, 116))
-            self.join_btns = []
-            for k, (ip, (name, count, _)) in enumerate(sorted(self.found.items())[:5]):
-                y = 150 + k * 62
-                row = pygame.Rect(right.x + 24, y, right.w - 48, 54)
-                pygame.draw.rect(surf, (20, 24, 44), row, border_radius=12)
-                draw_text(surf, f"{name}'s game", font(19, bold=True), WHITE, (row.x + 18, row.y + 18), anchor="midleft")
-                draw_text(surf, f"{count} player{'s' if count != 1 else ''}  -  {ip}", font(13), (170, 180, 210),
-                          (row.x + 18, row.y + 38), anchor="midleft")
-                b = Button((row.right - 130, row.y + 7, 118, 40), "JOIN", (25, 120, 60), 20)
-                b.draw(surf, mouse)
-                self.join_btns.append((ip, b))
-            if not self.found:
-                dots = "." * (int(self.t * 2) % 4)
-                draw_text(surf, "Looking for games" + dots, font(17), (170, 180, 210), (right.centerx, 250))
-                draw_text(surf, "When a friend hosts, their game shows up here.", font(14), (140, 150, 180),
-                          (right.centerx, 280))
-            draw_text(surf, "OR TYPE THE HOST'S ADDRESS", font(14, bold=True), (190, 200, 230), (self.addr_box.x, 505),
+            draw_text(surf, "JOIN WITH A ROOM CODE", font(14, bold=True), (190, 200, 230), (self.code_box.x, 150),
                       anchor="midleft")
-            self.text_box(surf, self.addr_box, self.addr, self.focus == "addr", "like 192.168.1.23")
-            self.btn_join_addr.draw(surf, mouse, bool(self.addr.strip()))
+            self.text_box(surf, self.code_box, "  ".join(self.code), self.focus == "code", "like  Q X F 7 K", size=30)
+            self.btn_join_code.draw(surf, mouse, len(self.code) == ROOM_LEN)
+            if WEB:
+                draw_text(surf, "Ask the host for their room code.", font(16), (170, 180, 210), (right.centerx, 290))
+                draw_text(surf, "(Games on your Wi-Fi without a code need the downloaded game.)", font(13),
+                          (140, 150, 180), (right.centerx, 318))
+            else:
+                draw_text(surf, "GAMES ON YOUR WI-FI", font(14, bold=True), (190, 200, 230), (self.code_box.x, 268),
+                          anchor="midleft")
+                self.join_btns = []
+                for k, (ip, (name, count, _)) in enumerate(sorted(self.found.items())[:3]):
+                    y = 288 + k * 62
+                    row = pygame.Rect(right.x + 24, y, right.w - 48, 54)
+                    pygame.draw.rect(surf, (20, 24, 44), row, border_radius=12)
+                    draw_text(surf, f"{name}'s game", font(19, bold=True), WHITE, (row.x + 18, row.y + 18), anchor="midleft")
+                    draw_text(surf, f"{count} player{'s' if count != 1 else ''}  -  {ip}", font(13), (170, 180, 210),
+                              (row.x + 18, row.y + 38), anchor="midleft")
+                    b = Button((row.right - 130, row.y + 7, 118, 40), "JOIN", (25, 120, 60), 20)
+                    b.draw(surf, mouse)
+                    self.join_btns.append((ip, b))
+                if not self.found:
+                    dots = "." * (int(self.t * 2) % 4)
+                    draw_text(surf, "Looking for games" + dots, font(16), (170, 180, 210), (right.centerx, 330))
+                    draw_text(surf, "A friend hosting on your Wi-Fi shows up here.", font(14), (140, 150, 180),
+                              (right.centerx, 358))
+                draw_text(surf, "OR TYPE THEIR WI-FI ADDRESS", font(14, bold=True), (190, 200, 230), (self.addr_box.x, 515),
+                          anchor="midleft")
+                self.text_box(surf, self.addr_box, self.addr, self.focus == "addr", "like 192.168.1.23")
+                self.btn_join_addr.draw(surf, mouse, bool(self.addr.strip()))
             if self.error:
                 draw_pill(surf, self.error, font(15, bold=True), (640, 612), (255, 200, 200), (60, 10, 10, 220),
                           (200, 80, 80), pad=(14, 4))
@@ -17271,6 +17354,436 @@ def art_party(kind):
 
 
 # --------------------------------------------------------------------------
+# Room codes: play with friends anywhere. The host's game still runs every table; the messages just travel
+# through Supabase Realtime (a live connection the casino's Supabase project already has) instead of the Wi-Fi.
+# --------------------------------------------------------------------------
+RELAY_ON = True                  # tests switch this off
+RELAY_URL = SUPABASE_URL.replace("https://", "wss://") + "/realtime/v1/websocket?apikey=" + SUPABASE_KEY + "&vsn=1.0.0"
+ROOM_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"      # no 0/O or 1/I to mix up
+ROOM_LEN = 5
+ROOM_PREFIX = "grand-royale-room-"
+RELAY_SEND_EVERY = 0.15          # messages are bundled: at most ~7 sends a second from each player
+RELAY_TIMEOUT = 15.0             # nothing heard for this long = that player (or the host) is gone
+RELAY_FIND_TIME = 12.0           # how long to wait for the host to answer a room code
+
+
+def new_room_code():
+    return "".join(random.choice(ROOM_CHARS) for _ in range(ROOM_LEN))
+
+
+def clean_code(text):
+    return "".join(ch for ch in str(text).upper() if ch.isalnum())[:ROOM_LEN]
+
+
+class WSConn:
+    """A WebSocket. On the PC a thread does all the talking; in the browser it's the page's own WebSocket."""
+    _next = 0
+
+    def __init__(self, url):
+        self.state = "connecting"            # then "open", then "closed"
+        self.error = ""
+        self.inbox = deque()
+        self.outbox = deque()
+        self.closing = False
+        if WEB:
+            self.start_web(url)
+        else:
+            threading.Thread(target=self.run, args=(url,), daemon=True).start()
+
+    # ---- the PC ----
+    def run(self, url):
+        import base64
+        import ssl
+        import struct
+        import urllib.parse
+        sock = None
+        try:
+            u = urllib.parse.urlsplit(url)
+            host, port = u.hostname, u.port or (443 if u.scheme == "wss" else 80)
+            sock = socket.create_connection((host, port), timeout=10)
+            if u.scheme == "wss":
+                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+            key = base64.b64encode(os.urandom(16)).decode()
+            sock.sendall((f"GET {u.path}?{u.query} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\n"
+                          f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise OSError("the server closed the connection")
+                buf += chunk
+            head, buf = buf.split(b"\r\n\r\n", 1)
+            first = head.split(b"\r\n")[0].decode("latin-1")
+            if " 101" not in first:
+                raise OSError(first)
+            self.state = "open"
+            sock.settimeout(0.05)
+            parts, kind = [], 0
+            while True:
+                while self.outbox:                      # everything the game wants to send
+                    self.frame(sock, 1, self.outbox.popleft().encode(), struct)
+                if self.closing:
+                    self.frame(sock, 8, b"", struct)
+                    break
+                try:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                except (socket.timeout, ssl.SSLWantReadError):
+                    pass
+                while len(buf) >= 2:                    # take out every complete frame
+                    op, n, pos = buf[0] & 15, buf[1] & 127, 2
+                    if n == 126:
+                        if len(buf) < 4:
+                            break
+                        n, pos = struct.unpack(">H", buf[2:4])[0], 4
+                    elif n == 127:
+                        if len(buf) < 10:
+                            break
+                        n, pos = struct.unpack(">Q", buf[2:10])[0], 10
+                    if len(buf) < pos + n:
+                        break
+                    data, fin, buf = buf[pos:pos + n], buf[0] & 128, buf[pos + n:]
+                    if op == 9:
+                        self.frame(sock, 10, data, struct)          # ping -> pong
+                    elif op == 8:
+                        raise OSError("the server closed the connection")
+                    elif op in (0, 1, 2):
+                        if op:
+                            kind, parts = op, []
+                        parts.append(data)
+                        if fin and kind == 1:
+                            self.inbox.append(b"".join(parts).decode("utf-8", "replace"))
+        except Exception as err:
+            self.error = str(err)[:120] or "connection lost"
+        self.state = "closed"
+        try:
+            if sock:
+                sock.close()
+        except OSError:
+            pass
+
+    @staticmethod
+    def frame(sock, op, data, struct):
+        mask = os.urandom(4)
+        n = len(data)
+        head = bytes([128 | op]) + (bytes([128 | n]) if n < 126 else
+                                    bytes([128 | 126]) + struct.pack(">H", n) if n < 65536 else
+                                    bytes([128 | 127]) + struct.pack(">Q", n))
+        body = bytes(b ^ mask[i & 3] for i, b in enumerate(data))
+        sock.settimeout(10)
+        sock.sendall(head + mask + body)
+        sock.settimeout(0.05)
+
+    # ---- the browser ----
+    def start_web(self, url):
+        import platform
+        WSConn._next += 1
+        self.wid = WSConn._next
+        platform.window.eval(
+            "(function(){window.__grws=window.__grws||{};const o={q:[],st:'connecting',err:''};"
+            "window.__grws[%d]=o;try{const ws=new WebSocket(%s);o.ws=ws;ws.onopen=()=>{o.st='open'};"
+            "ws.onmessage=e=>{if(typeof e.data==='string')o.q.push(e.data)};"
+            "ws.onclose=e=>{o.st='closed';o.err=o.err||('connection closed ('+e.code+')')};"
+            "ws.onerror=()=>{o.err='could not connect'};}catch(e){o.st='closed';o.err=String(e)}})()"
+            % (self.wid, json.dumps(url)))
+
+    def web_poll(self):
+        import platform
+        got = platform.window.eval(
+            "(function(){const o=window.__grws&&window.__grws[%d];if(!o)return '';"
+            "const r=JSON.stringify({st:o.st,err:o.err,q:o.q});o.q=[];return r;})()" % self.wid)
+        got = str(got) if got else ""
+        if not got:
+            return
+        info = json.loads(got)
+        if self.state != "closed":
+            self.state = str(info.get("st", "closed"))
+        if self.state == "closed" and not self.error:
+            self.error = str(info.get("err", ""))[:120] or "connection lost"
+        self.inbox.extend(str(t) for t in info.get("q", []))
+        while self.outbox and self.state == "open":
+            platform.window.eval("(function(){const o=window.__grws[%d];if(o&&o.ws&&o.ws.readyState===1)o.ws.send(%s)})()"
+                                 % (self.wid, json.dumps(self.outbox.popleft())))
+
+    # ---- both ----
+    def poll(self):
+        """Messages that arrived since last time."""
+        if WEB:
+            self.web_poll()
+        out = list(self.inbox)
+        self.inbox.clear()
+        return out
+
+    def send(self, text):
+        if self.state != "closed" and not self.closing:
+            self.outbox.append(text)
+            if WEB:
+                self.web_poll()
+
+    def close(self):
+        if WEB:
+            if self.state != "closed":
+                self.web_poll()                      # send what's waiting first
+            import platform
+            platform.window.eval("(function(){const o=window.__grws&&window.__grws[%d];if(o){try{o.ws.close()}catch(e){}"
+                                 "delete window.__grws[%d]}})()" % (self.wid, self.wid))
+            self.state = "closed"
+        self.closing = True
+
+
+class RealtimeChannel:
+    """One Supabase Realtime 'broadcast' channel: everyone in it gets what anyone sends."""
+
+    def __init__(self, name):
+        self.topic = "realtime:" + name
+        self.ws = WSConn(RELAY_URL)
+        self.ref = 0
+        self.join_ref = None
+        self.joined = False
+        self.error = ""
+        self.beat = 0.0
+        self.last = time.time()
+
+    def push(self, event, payload, topic=None):
+        self.ref += 1
+        m = {"topic": topic or self.topic, "event": event, "payload": payload, "ref": str(self.ref)}
+        if topic is None and self.join_ref:
+            m["join_ref"] = self.join_ref
+        self.ws.send(json.dumps(m, separators=(",", ":")))
+
+    def poll(self):
+        now = time.time()
+        dt, self.last = now - self.last, now
+        out = []
+        for text in self.ws.poll():
+            try:
+                m = json.loads(text)
+            except ValueError:
+                continue
+            if not isinstance(m, dict):
+                continue
+            ev, p = m.get("event"), m.get("payload") if isinstance(m.get("payload"), dict) else {}
+            if m.get("topic") != self.topic:
+                continue
+            if ev == "phx_reply" and m.get("ref") == self.join_ref:
+                if p.get("status") == "ok":
+                    self.joined = True
+                else:
+                    r = p.get("response")
+                    self.error = str(r.get("reason") if isinstance(r, dict) else r or "couldn't join")[:120]
+            elif ev == "broadcast":
+                inner = p.get("payload")
+                if isinstance(inner, dict):
+                    out.append(inner)
+            elif ev in ("phx_error", "phx_close"):
+                self.error = self.error or "the connection was closed"
+                self.joined = False
+            elif ev == "system" and p.get("status") == "error":
+                self.error = str(p.get("message") or "error")[:120]
+        if self.ws.state == "open":
+            if not self.join_ref:
+                self.join_ref = str(self.ref + 1)
+                self.push("phx_join", {"config": {"broadcast": {"ack": False, "self": False},
+                                                  "presence": {"key": ""}, "postgres_changes": [], "private": False}})
+            self.beat -= dt
+            if self.beat <= 0:
+                self.beat = 25.0
+                self.push("heartbeat", {}, topic="phoenix")
+        return out
+
+    def send(self, payload):
+        if self.joined:
+            self.push("broadcast", {"type": "broadcast", "event": "m", "payload": payload})
+
+    @property
+    def dead(self):
+        return self.ws.state == "closed" or bool(self.error)
+
+    def problem(self):
+        return self.error or self.ws.error or "couldn't connect"
+
+    def close(self):
+        self.ws.close()
+
+
+class LoopLink:
+    """The host's own connection to their game (no network needed)."""
+
+    def __init__(self):
+        self.inbox = []
+        self.peer = None
+        self.closed = False
+
+    def send(self, msg):
+        if not self.closed and self.peer and not self.peer.closed:
+            self.peer.inbox.append(json.loads(json.dumps(msg)))        # a copy, like a real connection
+
+    def read(self):
+        msgs, self.inbox = self.inbox, []
+        return msgs
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed = True
+        if self.peer:
+            self.peer.closed = True
+
+
+def loop_pair():
+    a, b = LoopLink(), LoopLink()
+    a.peer, b.peer = b, a
+    return a, b
+
+
+class RelayLink:
+    """The host's view of one player who joined with the room code."""
+
+    def __init__(self, hub, cid):
+        self.hub, self.cid = hub, cid
+        self.inbox = []
+        self.closed = False
+        self.seen = time.time()
+
+    def got(self, msgs):
+        self.seen = time.time()
+        for m in msgs:
+            if isinstance(m, dict):
+                if m.get("t") == "_bye":
+                    self.closed = True
+                else:
+                    self.inbox.append(m)
+
+    def send(self, msg):
+        if not self.closed:
+            self.hub.out.setdefault(self.cid, []).append(msg)
+
+    def read(self):
+        msgs, self.inbox = self.inbox, []
+        return msgs
+
+    def flush(self):
+        pass                       # the hub sends everything together
+
+    def close(self):
+        self.closed = True
+
+
+class RelayHub:
+    """The host's end of a room: everything for every player goes out bundled in one message."""
+
+    def __init__(self, code):
+        self.code = code
+        self.chan = RealtimeChannel(ROOM_PREFIX + code)
+        self.links = {}
+        self.out = {}
+        self.send_t = 0.0
+
+    def new_links(self):
+        """Players who just joined."""
+        new = []
+        for f in self.chan.poll():
+            cid, ms = str(f.get("f", ""))[:32], f.get("ms")
+            if f.get("to") != "host" or not cid or cid == "host" or not isinstance(ms, list):
+                continue
+            link = self.links.get(cid)
+            if link is None:
+                if any(isinstance(m, dict) and m.get("t") == "_bye" for m in ms):
+                    continue
+                link = self.links[cid] = RelayLink(self, cid)
+                new.append(link)
+            link.got(ms)
+        now = time.time()
+        for cid, link in list(self.links.items()):
+            if not link.closed and now - link.seen > RELAY_TIMEOUT:
+                link.closed = True
+        return new
+
+    def flush(self, dt):
+        self.send_t -= dt
+        for cid in [c for c, link in self.links.items() if link.closed and c not in self.out]:
+            self.links.pop(cid)
+        if self.out and self.send_t <= 0 and self.chan.joined:
+            self.send_t = RELAY_SEND_EVERY
+            self.chan.send({"f": "host", "b": self.out})
+            self.out = {}
+
+    def status(self):
+        if self.chan.joined:
+            return "online"
+        return "failed" if self.chan.dead else "connecting"
+
+    def close(self):
+        self.chan.send({"f": "host", "b": self.out, "bye": 1})
+        self.chan.close()
+
+
+class RelayClientLink:
+    """A player's connection to a host through a room code."""
+
+    def __init__(self, code):
+        self.code = code
+        self.cid = "".join(random.choice("abcdefghijkmnpqrstuvwxyz23456789") for _ in range(12))
+        self.chan = RealtimeChannel(ROOM_PREFIX + code)
+        self.out = []
+        self.inbox = []
+        self.closed = False
+        self.why = ""
+        self.start = time.time()
+        self.seen = None             # when the host last sent anything
+        self.sent = 0.0
+
+    def send(self, msg):
+        if not self.closed:
+            self.out.append(msg)
+
+    def read(self):
+        if self.closed:
+            return []
+        now = time.time()
+        for f in self.chan.poll():
+            if f.get("f") != "host":
+                continue
+            self.seen = now
+            b = f.get("b")
+            ms = b.get(self.cid) if isinstance(b, dict) else None
+            if isinstance(ms, list):
+                self.inbox.extend(m for m in ms if isinstance(m, dict))
+            if f.get("bye"):
+                self.shut("The host stopped the game")
+        if not self.closed:
+            if self.chan.dead:
+                self.shut("Couldn't connect to the room: " + self.chan.problem())
+            elif self.seen is None and now - self.start > RELAY_FIND_TIME:
+                self.shut(f"No game found with the code {self.code}")
+            elif self.seen is not None and now - self.seen > RELAY_TIMEOUT:
+                self.shut("Lost the connection to the game host")
+        msgs, self.inbox = self.inbox, []
+        return msgs
+
+    def flush(self):
+        now = time.time()
+        if self.out and not self.closed and self.chan.joined and now - self.sent >= RELAY_SEND_EVERY:
+            self.sent = now
+            self.chan.send({"f": self.cid, "to": "host", "ms": self.out})
+            self.out = []
+
+    def shut(self, why):
+        self.why = why
+        self.closed = True
+        self.chan.close()
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            self.chan.send({"f": self.cid, "to": "host", "ms": self.out + [{"t": "_bye"}]})
+            self.chan.close()
+
+
+# --------------------------------------------------------------------------
 # Lobby / menu
 # --------------------------------------------------------------------------
 def art_blackjack(assets, w, h):
@@ -17909,10 +18422,7 @@ class Menu:
                     self.set_tab(i)
                     return
             if self.btn_online.clicked(e.pos):
-                if WEB:
-                    self.app.effects.toast("MULTIPLAYER", "Playing with friends needs the downloaded version of the game")
-                else:
-                    self.app.scene = "online"
+                self.app.scene = "online"
                 return
             if self.btn_settings.clicked(e.pos):
                 self.app.scene = "settings"
@@ -18746,16 +19256,17 @@ HELP = {
               "right for the Employee of the Month trophy!"),
     ]),
     "online": ("MULTIPLAYER", [
-        ("h", "Play with friends on the same Wi-Fi"),
-        ("p", "Everyone needs the game on their own computer, and you all need to be on the same Wi-Fi. "
-              "No accounts or sign-ups - one person's game acts as the host."),
-        ("b", "Type your name, then one person presses HOST A GAME."),
-        ("b", "Everyone else opens MULTIPLAYER - the host's game shows up in the list. Press JOIN. "
-              "(If it doesn't show up, type the address the host's screen shows.)"),
-        ("b", "The first time you host, Windows may ask if Python can use the network. Click Allow "
-              "(private networks only)."),
+        ("h", "Play with friends anywhere"),
+        ("p", "One person's game acts as the host and runs the tables. Friends can be anywhere with internet - "
+              "on the downloaded game or the web version."),
+        ("b", "Type your name, then one person presses HOST A GAME. Their screen shows a 5-letter ROOM CODE."),
+        ("b", "Everyone else opens MULTIPLAYER, types the room code and presses JOIN."),
+        ("b", "The host has to keep their game open - if they stop hosting, everyone is disconnected."),
+        ("b", "On the same Wi-Fi (downloaded game only) you don't even need the code: the host's game shows up "
+              "in the list. Windows may ask the host if the game can use the network - click Allow."),
         ("h", "What you can do together"),
         ("b", "Everyone can play any game at any time."),
+        ("b", "PARTY - Crash Party, High Card Showdown, Liar's Dice and Bingo Night are made for playing together."),
         ("b", "POKER - a 4-seat table. Friends who sit down replace the computer players."),
         ("b", "BLACKJACK - everyone sits at one table and plays against the same dealer."),
         ("b", "Every other game - if friends are in the same game, a panel shows their bets and whether they "
@@ -19539,9 +20050,6 @@ class App:
         if self.net and key in ("poker", "blackjack"):
             key = "netpoker" if key == "poker" else "netbj"
         if key in MP_ONLY and not self.net:
-            if WEB:
-                self.effects.toast("PARTY GAMES NEED MULTIPLAYER", "Multiplayer is only in the downloaded game")
-                return
             self.effects.toast("PARTY GAMES NEED MULTIPLAYER", "Host a game or join a friend's, then pick a party game")
             key = "online"
         self.scene = key
@@ -19550,16 +20058,29 @@ class App:
         if self.net:
             return ""
         try:
-            self.net_server = NetServer(self.player_name)
+            self.net_server = NetServer(self.player_name, lan=not WEB, room=new_room_code() if RELAY_ON else None)
         except OSError:
             self.net_server = None
             return "COULDN'T START HOSTING - IS THIS COMPUTER ALREADY HOSTING A GAME?"
-        self.host_ip = local_ip()
-        err = self.join_game("127.0.0.1")
-        if err:
-            self.net_server.close()
-            self.net_server = None
-        return err
+        self.host_ip = local_ip() if self.net_server.sock else ""
+        mine, theirs = loop_pair()                     # the host plays in their own game too
+        self.net_server.add_client(theirs)
+        self.net = NetClient(self, "this computer", self.player_name, link=mine)
+        self.save()
+        return ""
+
+    def room_code(self):
+        return self.net_server.relay.code if self.net_server and self.net_server.relay else ""
+
+    def join_room(self, code):
+        if self.net:
+            return ""
+        code = clean_code(code)
+        if len(code) != ROOM_LEN:
+            return f"ROOM CODES ARE {ROOM_LEN} LETTERS AND NUMBERS"
+        self.net = NetClient(self, f"room {code}", self.player_name, link=RelayClientLink(code))
+        self.save()
+        return ""
 
     def join_game(self, addr):
         if self.net:
@@ -19586,6 +20107,7 @@ class App:
         self.chat_text = ""
         if why:
             self.effects.toast("DISCONNECTED", why)
+            self.scenes["online"].error = why.upper()[:90]
         self.save()
 
     def live_bet(self):
@@ -19938,7 +20460,7 @@ class App:
             if self.net_server:
                 self.net_server.update(dt)
             if self.net and not self.net.update(dt):
-                self.leave_game("Lost the connection to the game host")
+                self.leave_game(getattr(self.net.link, "why", "") or "Lost the connection to the game host")
             for ev in self.market.pop_alerts():
                 self.effects.toast(ev["title"], ev["sub"], ev["kind"])
                 self.sfx("alert")
