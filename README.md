@@ -5,7 +5,8 @@ cash value, and they can never be bought, sold, or exchanged for real money.
 
 30+ games (blackjack, poker, roulette, slots, craps, baccarat, pinball, Chicken Crossing, cups, a stock
 market, lottery and more), trophies, a job system for when you run out of chips, and multiplayer with
-friends on the same Wi-Fi (shared poker and blackjack tables, chat).
+friends on the same Wi-Fi (shared poker and blackjack tables, chat, and party games: Crash Party,
+High Card Showdown, Liar's Dice and Bingo Night).
 
 ## Play
 

@@ -12284,6 +12284,8 @@ class NetServer:
         self.next_id = 1
         self.poker = PokerTable(self)
         self.bj = BJTable(self)
+        self.party = {"crash": CrashTable(self), "hc": HighCardTable(self), "liar": LiarsTable(self),
+                      "bingo": BingoTable(self)}
         self.roster_t = 0.0
         self.beacon_t = 0.0
         self.beacon = None
@@ -12327,6 +12329,8 @@ class NetServer:
                 self.drop(pid)
         self.poker.update(dt)
         self.bj.update(dt)
+        for table in self.party.values():
+            table.update(dt)
         self.roster_t -= dt
         if self.roster_t <= 0:
             self.roster_t = 0.5
@@ -12382,6 +12386,8 @@ class NetServer:
             self.poker.on_msg(pid, c, m)
         elif t.startswith("bj_"):
             self.bj.on_msg(pid, c, m)
+        elif t.split("_")[0] in self.party:
+            self.party[t.split("_")[0]].on_msg(pid, c, m)
 
     def drop(self, pid):
         self.poker.stand(pid, gone=True)
@@ -12389,6 +12395,8 @@ class NetServer:
         if i is not None:
             self.poker.seats[i]["gone"] = True
         self.bj.drop(pid)
+        for table in self.party.values():
+            table.drop(pid)
         c = self.clients.pop(pid, None)
         if c:
             c["link"].close()
@@ -12487,6 +12495,10 @@ class NetClient:
             app.scenes["netbj"].on_state(m.get("s") or {})
         elif t in ("bj_result", "bj_refund", "bj_full"):
             app.scenes["netbj"].on_msg(m)
+        elif t in MP_KINDS:
+            app.scenes[MP_KINDS[t]].on_state(m.get("s") or {})
+        elif t in ("mp_result", "mp_refund", "mp_bonus") and m.get("game") in MP_KINDS:
+            app.scenes[MP_KINDS[m["game"]]].on_msg(m)
 
     def close(self):
         self.link.flush()
@@ -13004,6 +13016,8 @@ class NetBlackjack(StakeGame):
 
 # ---- the multiplayer screen ----------------------------------------------------
 SCENE_NAMES = {"menu": "IN THE LOBBY", "netpoker": "POKER TABLE", "netbj": "BLACKJACK TABLE", "online": "MULTIPLAYER",
+               "mp_crash": "CRASH PARTY", "mp_highcard": "HIGH CARD SHOWDOWN", "mp_liars": "LIAR'S DICE",
+               "mp_bingo": "BINGO NIGHT",
                "work": "AT WORK"}
 
 
@@ -16248,6 +16262,1015 @@ def draw_chicken_costume(surf, x, y, k, top):
 
 
 # --------------------------------------------------------------------------
+# Party games - multiplayer only. The host's game runs each table; everyone plays together.
+# --------------------------------------------------------------------------
+MP_JOIN_WAIT = 12.0          # seconds for others to join a round someone started
+MP_TURN = 30.0               # seconds per turn in Liar's Dice
+CRASH_BET_TIME = 10.0
+CRASH_LAST_BONUS = 0.2       # the last player to cash out gets 20% extra profit
+BINGO_BUY_TIME = 20.0
+BINGO_CALL_EVERY = 3.0
+BINGO_GRACE = 8.0            # a bingo nobody claims is claimed for you after this long
+HC_ORDER = {r: i for i, r in enumerate(["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"])}
+BINGO_CX = 700
+DICE_WORDS = {1: "ones", 2: "twos", 3: "threes", 4: "fours", 5: "fives", 6: "sixes"}
+
+
+def dice_count(n, face):
+    """3 fives, 1 five, no fives"""
+    return f"{n} {DICE_WORDS[face][:-2] if face == 6 and n == 1 else (DICE_WORDS[face][:-1] if n == 1 else DICE_WORDS[face])}" if n else f"no {DICE_WORDS[face]}"
+
+
+class MPTable:
+    """A party game table on the host."""
+    kind = ""
+    RESEND = 1.0
+
+    def __init__(self, srv):
+        self.srv = srv
+        self.queue = []
+        self.dirty = True
+        self.resend = 0.0
+        self.msg = ""
+        self.names = {}                   # remembered, so players who left still show up by name
+
+    def name(self, pid):
+        c = self.srv.clients.get(pid)
+        if c:
+            self.names[pid] = c["name"]
+        return self.names.get(pid, "?")
+
+    def pay(self, pid, stake, returned, text=""):
+        self.srv.send(pid, {"t": "mp_result", "game": self.kind, "stake": int(stake), "returned": int(returned),
+                            "text": text})
+
+    def refund(self, pid, amount, why=""):
+        self.srv.send(pid, {"t": "mp_refund", "game": self.kind, "amount": int(amount), "text": why})
+
+    def update(self, dt):
+        self.tick(dt)
+        self.resend -= dt
+        if self.dirty or self.resend <= 0:
+            self.dirty = False
+            self.resend = self.RESEND
+            for pid in list(self.srv.clients):
+                self.srv.send(pid, {"t": self.kind, "s": self.view(pid)})
+
+    def tick(self, dt):
+        pass
+
+    def drop(self, pid):
+        pass
+
+
+class CrashTable(MPTable):
+    kind = "crash"
+    RESEND = 0.5
+
+    def __init__(self, srv):
+        super().__init__(srv)
+        self.phase = "betting"
+        self.timer = CRASH_BET_TIME
+        self.t = 0.0
+        self.bets = {}
+        self.crash_at = 1.0
+        self.history = []
+
+    def mult(self):
+        return math.exp(ROCKET_RATE * self.t)
+
+    def on_msg(self, pid, c, m):
+        t = m.get("t")
+        if t == "crash_bet":
+            amt = net_int(m.get("amount"))
+            if self.phase != "betting" or pid in self.bets or amt <= 0:
+                self.refund(pid, amt, "BETS ARE CLOSED - WAIT FOR THE NEXT ROUND")
+                return
+            self.bets[pid] = {"bet": amt, "out": None}
+            self.dirty = True
+        elif t == "crash_cash":
+            b = self.bets.get(pid)
+            if self.phase == "flying" and b and b["out"] is None:
+                b["out"] = round(min(self.mult(), self.crash_at), 2)
+                self.pay(pid, b["bet"], int(b["bet"] * b["out"]), f"CASHED OUT AT x{b['out']:.2f}")
+                self.dirty = True
+
+    def drop(self, pid):
+        self.bets.pop(pid, None)
+
+    def tick(self, dt):
+        if self.phase == "betting":
+            self.timer -= dt
+            if self.timer <= 0:
+                u = random.random()                             # same odds as the single-player Rocket (97%)
+                self.crash_at = min(500.0, max(1.0, math.floor(0.97 / (1 - u) * 100) / 100))
+                self.phase, self.t = "flying", 0.0
+                self.msg = ""
+                self.dirty = True
+        elif self.phase == "flying":
+            self.t += dt
+            if self.mult() >= self.crash_at:
+                self.crash()
+        else:
+            self.timer -= dt
+            if self.timer <= 0:
+                self.phase, self.timer, self.bets = "betting", CRASH_BET_TIME, {}
+                self.dirty = True
+
+    def crash(self):
+        self.phase, self.timer = "crashed", 5.0
+        self.history = ([self.crash_at] + self.history)[:12]
+        outs = [(b["out"], pid) for pid, b in self.bets.items() if b["out"]]
+        for pid, b in self.bets.items():
+            if b["out"] is None:
+                self.pay(pid, b["bet"], 0, f"BOOM AT x{self.crash_at:.2f} - YOU LOSE {money(b['bet'])}")
+        self.msg = f"BOOM AT x{self.crash_at:.2f}"
+        if len(outs) >= 1:
+            out, pid = max(outs)
+            bonus = int(self.bets[pid]["bet"] * (out - 1) * CRASH_LAST_BONUS)
+            if bonus > 0:
+                self.srv.send(pid, {"t": "mp_bonus", "game": self.kind, "amount": bonus,
+                                    "text": f"LAST ONE OUT! +{money(bonus)} BONUS"})
+                self.msg += f"   -   {self.name(pid).upper()} WAS THE LAST ONE OUT (+{money(bonus)})"
+        self.dirty = True
+
+    def view(self, pid):
+        return {"phase": self.phase, "t": round(self.t, 2), "timer": round(self.timer, 1),
+                "crash": self.crash_at if self.phase == "crashed" else None, "history": self.history, "msg": self.msg,
+                "bets": [{"pid": p, "name": self.name(p), "bet": b["bet"], "out": b["out"]} for p, b in self.bets.items()]}
+
+
+class PotTable(MPTable):
+    """Someone starts a round with an amount; others have a little while to join for the same amount."""
+    start_msg, join_msg = "", ""
+
+    def __init__(self, srv):
+        super().__init__(srv)
+        self.phase = "idle"
+        self.ante = 0
+        self.players = []                 # pids in this round, in join order
+        self.timer = 0.0
+
+    @property
+    def pot(self):
+        return self.ante * len(self.players)
+
+    def on_msg(self, pid, c, m):
+        t = m.get("t", "")
+        amt = net_int(m.get("amount"))
+        if t.endswith("_start"):
+            if self.phase != "idle" or amt <= 0:
+                self.refund(pid, amt, "A ROUND IS ALREADY GOING - JOIN IT INSTEAD")
+                return
+            self.ante, self.players, self.phase, self.timer = amt, [pid], "joining", MP_JOIN_WAIT
+            self.msg = f"{self.name(pid).upper()} STARTED A ROUND FOR {money(amt)}"
+            self.new_round()
+            self.dirty = True
+        elif t.endswith("_join"):
+            if self.phase != "joining" or pid in self.players or amt != self.ante:
+                self.refund(pid, amt, "YOU CAN'T JOIN RIGHT NOW")
+                return
+            self.players.append(pid)
+            self.dirty = True
+        else:
+            self.play_msg(pid, t, m)
+
+    def new_round(self):
+        pass
+
+    def play_msg(self, pid, t, m):
+        pass
+
+    def tick(self, dt):
+        if self.queue:
+            self.queue[0][0] -= dt
+            if self.queue[0][0] <= 0:
+                _, fn = self.queue.pop(0)
+                fn()
+                self.dirty = True
+            return
+        if self.phase == "joining":
+            self.timer -= dt
+            if self.timer <= 0:
+                live = [p for p in self.players if p in self.srv.clients]
+                if len(live) < 2:
+                    for p in live:
+                        self.refund(p, self.ante, "NOBODY ELSE JOINED - YOUR CHIPS ARE BACK")
+                    self.phase, self.players = "idle", []
+                    self.msg = "NOT ENOUGH PLAYERS JOINED"
+                else:
+                    self.players = live
+                    self.begin()
+                self.dirty = True
+        else:
+            self.play_tick(dt)
+
+    def begin(self):
+        pass
+
+    def play_tick(self, dt):
+        pass
+
+    def settle(self, winner, text):
+        pot = self.pot
+        for p in self.players:
+            if p == winner:
+                self.pay(p, self.ante, pot, f"YOU WIN THE {money(pot)} POT!")
+            else:
+                self.pay(p, self.ante, 0, f"{self.name(winner).upper()} WINS THE {money(pot)} POT")
+        self.msg = text
+        self.phase, self.timer = "over", 6.0
+        self.dirty = True
+
+    def finish_over(self, dt):
+        self.timer -= dt
+        if self.timer <= 0:
+            self.phase, self.players = "idle", []
+            self.dirty = True
+
+    def drop(self, pid):
+        if self.phase == "joining" and pid in self.players:
+            self.players.remove(pid)
+            self.dirty = True
+
+
+class HighCardTable(PotTable):
+    kind = "hc"
+
+    def new_round(self):
+        self.cards, self.out, self.winner, self.sudden = {}, set(), None, 0
+
+    def begin(self):
+        self.deal(list(self.players))
+
+    def deal(self, pids):
+        deck = [(r, s) for s in SUITS for r in RANKS]
+        random.shuffle(deck)
+        for p in pids:
+            self.cards[p] = deck.pop()
+        self.contest = pids
+        self.phase, self.timer = "dealt", 2.5
+        self.dirty = True
+
+    def play_tick(self, dt):
+        if self.phase == "dealt":
+            self.timer -= dt
+            if self.timer <= 0:
+                self.phase, self.timer = "shown", 2.5
+                self.dirty = True
+        elif self.phase == "shown":
+            self.timer -= dt
+            if self.timer <= 0:
+                best = max(HC_ORDER[self.cards[p][0]] for p in self.contest)
+                tied = [p for p in self.contest if HC_ORDER[self.cards[p][0]] == best]
+                self.out |= set(self.contest) - set(tied)
+                if len(tied) > 1:
+                    self.sudden += 1
+                    self.msg = "TIE!  SUDDEN DEATH BETWEEN " + " & ".join(self.name(p).upper() for p in tied)
+                    self.deal(tied)
+                else:
+                    self.winner = tied[0]
+                    rank = self.cards[tied[0]][0]
+                    self.settle(tied[0], f"{self.name(tied[0]).upper()} WINS {money(self.pot)} WITH THE {rank}!")
+        elif self.phase == "over":
+            self.finish_over(dt)
+
+    def view(self, pid):
+        shown = self.phase in ("shown", "over")
+        return {"phase": self.phase, "ante": self.ante, "pot": self.pot, "timer": round(self.timer, 1), "msg": self.msg,
+                "sudden": getattr(self, "sudden", 0),
+                "players": [{"pid": p, "name": self.name(p), "card": list(self.cards[p]) if shown and p in getattr(self, "cards", {}) else None,
+                             "has_card": p in getattr(self, "cards", {}), "out": p in getattr(self, "out", set()),
+                             "win": p == getattr(self, "winner", None)} for p in self.players]}
+
+
+class LiarsTable(PotTable):
+    kind = "liar"
+
+    def new_round(self):
+        self.dice, self.bid, self.turn, self.log, self.reveal, self.turn_t = {}, None, 0, [], None, MP_TURN
+
+    def begin(self):
+        for p in self.players:
+            self.dice[p] = [random.randint(1, 6) for _ in range(5)]
+        self.turn = random.randrange(len(self.players))
+        self.phase, self.turn_t = "playing", MP_TURN
+        self.log = [f"{self.name(self.cur()).upper()} BIDS FIRST"]
+
+    def alive(self):
+        return [p for p in self.players if self.dice.get(p)]
+
+    def cur(self):
+        return self.players[self.turn]
+
+    def next_turn(self):
+        for k in range(1, len(self.players) + 1):
+            i = (self.turn + k) % len(self.players)
+            if self.dice.get(self.players[i]):
+                self.turn = i
+                break
+        self.turn_t = MP_TURN
+
+    def total_dice(self):
+        return sum(len(self.dice.get(p, [])) for p in self.players)
+
+    def play_msg(self, pid, t, m):
+        if self.phase != "playing" or pid != self.cur():
+            return
+        if t == "liar_bid":
+            qty, face = net_int(m.get("qty"), 99), net_int(m.get("face"), 6)
+            b = self.bid
+            ok = 1 <= face <= 6 and 1 <= qty <= self.total_dice() and (
+                b is None or qty > b[0] or (qty == b[0] and face > b[1]))
+            if ok:
+                self.bid = (qty, face, pid)
+                self.log = (self.log + [f"{self.name(pid).upper()}: {dice_count(qty, face)}"])[-7:]
+                self.next_turn()
+                self.dirty = True
+        elif t == "liar_call" and self.bid:
+            self.call(pid)
+
+    def call(self, caller):
+        qty, face, bidder = self.bid
+        count = sum(d.count(face) for d in self.dice.values())
+        loser = caller if count >= qty else bidder
+        self.reveal = {"count": count, "qty": qty, "face": face, "loser": self.name(loser), "caller": self.name(caller),
+                       "bidder": self.name(bidder)}
+        self.log = (self.log + [f"{self.name(caller).upper()} CALLS LIAR!  THERE WERE {dice_count(count, face).upper()}"])[-7:]
+        self.phase, self.timer = "reveal", 5.0
+        self.loser = loser
+        self.dirty = True
+
+    def play_tick(self, dt):
+        if self.phase == "playing":
+            if not self.dice.get(self.cur()):
+                self.next_turn()
+            self.turn_t -= dt
+            if self.turn_t <= 0:                        # too slow: call liar (or open with a small bid)
+                p = self.cur()
+                if self.bid:
+                    self.call(p)
+                else:
+                    self.play_msg(p, "liar_bid", {"qty": 1, "face": random.randint(1, 6)})
+        elif self.phase == "reveal":
+            self.timer -= dt
+            if self.timer <= 0:
+                loser = self.loser
+                if self.dice.get(loser):
+                    self.dice[loser].pop()
+                alive = self.alive()
+                if len(alive) == 1:
+                    self.settle(alive[0], f"{self.name(alive[0]).upper()} IS THE LAST ONE WITH DICE - WINS {money(self.pot)}!")
+                    return
+                for p in alive:
+                    self.dice[p] = [random.randint(1, 6) for _ in range(len(self.dice[p]))]
+                self.bid, self.reveal = None, None
+                self.turn = self.players.index(loser) if self.dice.get(loser) else self.turn
+                if not self.dice.get(self.cur()):
+                    self.next_turn()
+                self.turn_t = MP_TURN
+                self.phase = "playing"
+                self.log = (self.log + [f"NEW ROUND - {self.name(self.cur()).upper()} BIDS"])[-7:]
+                self.dirty = True
+        elif self.phase == "over":
+            self.finish_over(dt)
+
+    def drop(self, pid):
+        super().drop(pid)
+        if self.phase in ("playing", "reveal") and self.dice.get(pid):
+            self.dice[pid] = []
+            alive = self.alive()
+            if len(alive) == 1:
+                self.settle(alive[0], f"EVERYONE ELSE LEFT - {self.name(alive[0]).upper()} WINS")
+            elif self.phase == "playing" and self.cur() == pid:
+                self.next_turn()
+            self.dirty = True
+
+    def view(self, pid):
+        show_all = self.phase in ("reveal", "over")
+        d = getattr(self, "dice", {})
+        return {"phase": self.phase, "ante": self.ante, "pot": self.pot, "timer": round(self.timer, 1), "msg": self.msg,
+                "turn": self.cur() if self.phase == "playing" and self.players else None,
+                "turn_t": round(getattr(self, "turn_t", 0), 1), "total": self.total_dice() if d else 0,
+                "bid": {"qty": self.bid[0], "face": self.bid[1], "name": self.name(self.bid[2])} if getattr(self, "bid", None) else None,
+                "mine": d.get(pid, []), "log": getattr(self, "log", []), "reveal": getattr(self, "reveal", None),
+                "players": [{"pid": p, "name": self.name(p), "n": len(d.get(p, [])),
+                             "dice": d.get(p, []) if show_all else None} for p in self.players]}
+
+
+def bingo_card():
+    cols = [random.sample(range(1 + 15 * c, 16 + 15 * c), 5) for c in range(5)]
+    card = [[cols[c][r] for c in range(5)] for r in range(5)]
+    card[2][2] = 0                                   # the free space
+    return card
+
+
+def bingo_lines(card, called):
+    marked = set(called) | {0}
+    lines = [row for row in card] + [[card[r][c] for r in range(5)] for c in range(5)]
+    lines += [[card[i][i] for i in range(5)], [card[i][4 - i] for i in range(5)]]
+    return any(all(n in marked for n in line) for line in lines)
+
+
+class BingoTable(PotTable):
+    kind = "bingo"
+
+    def new_round(self):
+        self.cards, self.called, self.call_t, self.ready_since = {}, [], 1.0, {}
+        self.cards[self.players[0]] = bingo_card()
+
+    def on_msg(self, pid, c, m):
+        before = list(self.players)
+        super().on_msg(pid, c, m)
+        if m.get("t") == "bingo_join" and pid in self.players and pid not in before:
+            self.cards[pid] = bingo_card()
+
+    def begin(self):
+        self.phase = "calling"
+        self.pool = list(range(1, 76))
+        random.shuffle(self.pool)
+
+    def play_msg(self, pid, t, m):
+        if t == "bingo_claim" and self.phase == "calling" and pid in self.cards and bingo_lines(self.cards[pid], self.called):
+            self.settle(pid, f"BINGO!  {self.name(pid).upper()} WINS {money(self.pot)}!")
+
+    def play_tick(self, dt):
+        if self.phase == "calling":
+            self.call_t -= dt
+            if self.call_t <= 0 and self.pool:
+                self.call_t = BINGO_CALL_EVERY
+                self.called.append(self.pool.pop())
+                self.dirty = True
+            now = time.time()
+            for p in self.players:
+                if bingo_lines(self.cards[p], self.called):
+                    self.ready_since.setdefault(p, now)
+                    if now - self.ready_since[p] > BINGO_GRACE:        # nobody claimed it - claim it for them
+                        self.settle(p, f"BINGO!  {self.name(p).upper()} WINS {money(self.pot)}!")
+                        return
+        elif self.phase == "over":
+            self.finish_over(dt)
+
+    def view(self, pid):
+        cards = getattr(self, "cards", {})
+        return {"phase": self.phase, "ante": self.ante, "pot": self.pot, "timer": round(self.timer, 1), "msg": self.msg,
+                "called": getattr(self, "called", []), "card": cards.get(pid),
+                "players": [{"pid": p, "name": self.name(p)} for p in self.players]}
+
+
+# ---- the screens ------------------------------------------------------------------------------
+MP_KINDS = {"crash": "mp_crash", "hc": "mp_highcard", "liar": "mp_liars", "bingo": "mp_bingo"}
+
+
+class MPGame(StakeGame):
+    """A party game screen. Chips you put in are 'in play' until the host says how the round went."""
+    kind = ""
+    title = ""
+
+    def __init__(self, app):
+        super().__init__(app, ((12, 10, 26), (80, 70, 140)))
+        self.state = None
+        self.in_play = 0
+        self.t = 0.0
+        self.bg = gradient_bg((40, 18, 70), (8, 5, 18))
+        self.btn_main = Button((965, 646, 270, 62), "", (25, 120, 60), 20)
+        self.message = "HOST OR JOIN A MULTIPLAYER GAME TO PLAY"
+
+    def me(self):
+        return self.app.net.id if self.app.net else None
+
+    def on_state(self, s):
+        self.state = s
+
+    def on_msg(self, m):
+        t = m.get("t")
+        if t == "mp_result":
+            stake, ret = net_int(m.get("stake")), net_int(m.get("returned"))
+            self.in_play = max(0, self.in_play - stake)
+            self.app.balance += ret
+            self.app.record(self.key, stake, ret)
+            self.message = str(m.get("text", ""))[:90]
+            if ret > stake:
+                self.app.float_text(f"+{money(ret - stake)}", (80, 230, 110))
+                self.app.sfx("win")
+            elif ret < stake:
+                self.app.sfx("lose")
+            self.app.save()
+        elif t == "mp_refund":
+            amt = net_int(m.get("amount"))
+            self.app.balance += amt
+            self.in_play = max(0, self.in_play - amt)
+            self.message = str(m.get("text", ""))[:90]
+        elif t == "mp_bonus":
+            amt = net_int(m.get("amount"))
+            self.app.balance += amt
+            self.app.float_text(f"+{money(amt)}", (255, 220, 90))
+            self.app.effects.toast(str(m.get("text", "BONUS!")), f"{self.title}: +{money(amt)}")
+            self.app.sfx("win")
+
+    def busy(self):
+        return self.in_play > 0
+
+    def can_leave(self):
+        return self.in_play == 0
+
+    def outstanding_bets(self):
+        return self.in_play
+
+    def lost(self):
+        self.app.balance += self.in_play
+        self.in_play = 0
+        self.state = None
+
+    def send(self, msg):
+        if self.app.net:
+            self.app.net.send(msg)
+
+    def commit(self, amount):
+        if amount <= 0:
+            self.message = "ADD CHIPS TO SET THE AMOUNT FIRST"
+            return False
+        if amount > self.app.balance:
+            self.message = "NOT ENOUGH CHIPS"
+            return False
+        self.app.balance -= amount
+        self.in_play += amount
+        self.app.sfx("chip")
+        return True
+
+    def pot_action(self, prefix):
+        """START a round with your chip amount, or JOIN the one that's starting."""
+        s = self.state or {}
+        mine = self.me() in [p["pid"] for p in s.get("players", [])]
+        if s.get("phase") == "idle" and self.commit(self.bet):
+            self.send({"t": prefix + "_start", "amount": self.bet})
+        elif s.get("phase") == "joining" and not mine and self.commit(s["ante"]):
+            self.send({"t": prefix + "_join", "amount": s["ante"]})
+
+    def pot_button(self):
+        s = self.state or {}
+        mine = self.me() in [p["pid"] for p in s.get("players", [])]
+        ph = s.get("phase")
+        if not self.app.net:
+            return "NOT CONNECTED", False
+        if ph == "idle":
+            return (f"START FOR {money(self.bet)}" if self.bet else "SET AN AMOUNT"), 0 < self.bet <= self.app.balance
+        if ph == "joining" and not mine:
+            return f"JOIN FOR {money(s['ante'])}", s["ante"] <= self.app.balance
+        if ph == "joining":
+            return f"STARTING IN {max(0, math.ceil(s['timer']))}", False
+        if ph == "over":
+            return "NEXT ROUND SOON", False
+        return "ROUND IN PLAY", False
+
+    def update(self, dt):
+        self.t += dt
+
+    def handle(self, e):
+        if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            if self.chip_click(e.pos):
+                return
+            if self.btn_clear.clicked(e.pos):
+                self.bet = 0
+
+    def draw_players(self, surf, rows, title="PLAYERS"):
+        """rows: (name, detail, colour, highlighted)"""
+        box = pygame.Rect(W - 300, 70, 280, 40 + 40 * max(1, len(rows)))
+        soft_panel(surf, box, 170, (110, 90, 170))
+        draw_text(surf, title, font(14, bold=True), GOLD, (box.x + 16, box.y + 20), anchor="midleft")
+        for i, (name, detail, col, hl) in enumerate(rows):
+            y = box.y + 48 + i * 40
+            if hl:
+                pygame.draw.rect(surf, (70, 55, 110), (box.x + 8, y - 17, box.w - 16, 34), border_radius=8)
+            draw_text(surf, name, fit_font(name, 16, 130), WHITE, (box.x + 16, y), anchor="midleft")
+            draw_text(surf, detail, font(14, bold=True), col, (box.right - 14, y), anchor="midright")
+        if not rows:
+            draw_text(surf, "nobody yet", font(14), (170, 160, 190), (box.x + 16, box.y + 50), anchor="midleft")
+
+    def draw_frame(self, surf, main_label, main_on, color=(25, 120, 60)):
+        mouse = pygame.mouse.get_pos()
+        if self.message:
+            draw_pill(surf, self.message, font(15, bold=True), (560, 612), GOLD, (0, 0, 0, 210), GOLD_DARK, pad=(14, 4))
+        self.btn_main.text, self.btn_main.color = main_label, color
+        self.btn_main.size = 20 if len(main_label) < 16 else 17
+        self.draw_bottom(surf, mouse, self.btn_main, main_on, (10, 6, 18))
+        self.app.draw_top_bar(surf, self.title, lobby=True, lobby_enabled=self.can_leave())
+        draw_text(surf, "PARTY GAME  -  MULTIPLAYER", font(12, bold=True), (190, 160, 255), (640, 50))
+
+
+class CrashParty(MPGame):
+    key, kind, title = "mp_crash", "crash", "CRASH PARTY"
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.local_t = 0.0
+        self.message = "BET BEFORE THE ROCKET LAUNCHES - THEN CASH OUT BEFORE IT BLOWS UP!"
+
+    def on_state(self, s):
+        prev = (self.state or {}).get("phase")
+        self.state = s
+        if s["phase"] == "flying" and (prev != "flying" or abs(self.local_t - s["t"]) > 0.4):
+            self.local_t = s["t"]
+        if s["phase"] == "crashed" and prev == "flying":
+            self.app.sfx("boom")
+            self.app.effects.burst(*self.rocket_pos(), 40, [(255, 140, 40), (255, 230, 120), (220, 60, 40)])
+        if s["phase"] == "flying" and prev == "betting":
+            self.app.sfx("launch")
+
+    def my_bet(self):
+        me = self.me()
+        return next((b for b in (self.state or {}).get("bets", []) if b["pid"] == me), None)
+
+    def mult(self):
+        s = self.state or {}
+        if s.get("phase") == "crashed":
+            return s["crash"]
+        if s.get("phase") == "flying":
+            return math.exp(ROCKET_RATE * self.local_t)
+        return 1.0
+
+    def rocket_pos(self):
+        g = pygame.Rect(60, 90, 780, 470)
+        m = self.mult()
+        top = max(2.0, m * 1.25)
+        tmax = max(8.0, math.log(top) / ROCKET_RATE)
+        tt = math.log(max(1.0, m)) / ROCKET_RATE
+        return g.x + tt / tmax * g.w, g.bottom - (m - 1) / (top - 1) * g.h
+
+    def update(self, dt):
+        self.t += dt
+        if (self.state or {}).get("phase") == "flying":
+            self.local_t += dt
+
+    def handle(self, e):
+        s = self.state or {}
+        act = (e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and self.btn_main.rect.collidepoint(e.pos)) or \
+              (e.type == pygame.KEYDOWN and e.key == pygame.K_SPACE)
+        if act and self.app.net:
+            b = self.my_bet()
+            if s.get("phase") == "betting" and not b and self.commit(self.bet):
+                self.send({"t": "crash_bet", "amount": self.bet})
+            elif s.get("phase") == "flying" and b and b["out"] is None:
+                self.send({"t": "crash_cash"})
+            return
+        super().handle(e)
+
+    def draw(self, surf):
+        surf.blit(self.bg, (0, 0))
+        s = self.state or {}
+        g = pygame.Rect(60, 90, 780, 470)
+        soft_panel(surf, g.inflate(20, 20), 120, (110, 90, 170))
+        m = self.mult()
+        ph = s.get("phase")
+        if ph in ("flying", "crashed"):
+            top = max(2.0, m * 1.25)
+            tmax = max(8.0, math.log(top) / ROCKET_RATE)
+            tt = math.log(max(1.0, m)) / ROCKET_RATE
+            pts = [(g.x + x / 40 * tt / tmax * g.w, g.bottom - (math.exp(ROCKET_RATE * tt * x / 40) - 1) / (top - 1) * g.h)
+                   for x in range(41)]
+            pygame.draw.lines(surf, (255, 90, 90) if ph == "crashed" else (120, 240, 160), False, pts, 4)
+            x, y = pts[-1]
+            if ph == "flying":
+                pygame.draw.polygon(surf, (235, 235, 245), [(x + 16, y - 10), (x - 12, y - 4), (x - 6, y + 12)])
+                pygame.draw.circle(surf, (255, 170, 40), (x - 10, y + 8), 6 + 3 * math.sin(self.t * 30))
+        big = f"x{m:.2f}"
+        col = (255, 90, 90) if ph == "crashed" else ((120, 240, 160) if ph == "flying" else (200, 190, 230))
+        draw_text(surf, big, font(80, bold=True), col, (g.centerx, g.y + 120), shadow=(0, 0, 0))
+        if ph == "betting":
+            draw_text(surf, f"LAUNCHING IN {max(0, math.ceil(s.get('timer', 0)))}", font(28, bold=True), GOLD,
+                      (g.centerx, g.y + 200))
+        elif ph == "crashed":
+            draw_text(surf, "BOOM!", font(40, bold=True), (255, 120, 90), (g.centerx, g.y + 200))
+        hist = s.get("history", [])
+        for i, h in enumerate(hist[:10]):
+            draw_pill(surf, f"x{h:.2f}", font(12, bold=True), (g.x + 40 + i * 76, g.bottom + 26),
+                      WHITE, (30, 130, 70, 220) if h >= 2 else (150, 40, 50, 220), None, pad=(8, 2))
+        rows = []
+        for b in sorted(s.get("bets", []), key=lambda b: -(b["out"] or 0)):
+            if b["out"]:
+                rows.append((b["name"], f"OUT x{b['out']:.2f}", (120, 240, 150), b["pid"] == self.me()))
+            elif ph == "crashed":
+                rows.append((b["name"], f"LOST {money(b['bet'])}", (240, 120, 120), b["pid"] == self.me()))
+            else:
+                rows.append((b["name"], f"{money(b['bet'])} RIDING", GOLD, b["pid"] == self.me()))
+        self.draw_players(surf, rows, "THIS ROUND")
+        if s.get("msg") and ph == "crashed":
+            draw_pill(surf, s["msg"], font(14, bold=True), (g.centerx, g.y + 250), WHITE, (0, 0, 0, 200), None, pad=(12, 3))
+        b = self.my_bet()
+        if not self.app.net:
+            label, on = "NOT CONNECTED", False
+        elif ph == "flying" and b and b["out"] is None:
+            label, on = f"CASH OUT {money(int(b['bet'] * m))}", True
+        elif ph == "betting" and not b:
+            label, on = (f"BET {money(self.bet)}" if self.bet else "SET YOUR BET"), 0 < self.bet <= self.app.balance
+        elif b and ph == "betting":
+            label, on = "YOU'RE IN!", False
+        else:
+            label, on = "NEXT ROUND SOON", False
+        self.draw_frame(surf, label, on, (215, 120, 15) if label.startswith("CASH") else (25, 120, 60))
+
+
+class HighCardShowdown(MPGame):
+    key, kind, title = "mp_highcard", "hc", "HIGH CARD SHOWDOWN"
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.bg = felt_table((12, 60, 34), (28, 105, 60))
+        self.message = "START A ROUND (OR JOIN ONE) - HIGHEST CARD TAKES THE POT"
+
+    def handle(self, e):
+        act = (e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and self.btn_main.rect.collidepoint(e.pos)) or \
+              (e.type == pygame.KEYDOWN and e.key == pygame.K_SPACE)
+        if act:
+            self.pot_action("hc")
+            return
+        super().handle(e)
+
+    def draw(self, surf):
+        surf.blit(self.bg, (0, 0))
+        s = self.state or {}
+        ph = s.get("phase", "idle")
+        players = s.get("players", [])
+        draw_text(surf, "HIGH CARD SHOWDOWN", font(36, bold=True, serif=True), GOLD, (500, 110), shadow=(0, 0, 0))
+        if s.get("pot"):
+            draw_pill(surf, f"POT  {money(s['pot'])}", font(22, bold=True), (500, 160), GOLD, (0, 0, 0, 200), GOLD_DARK,
+                      pad=(16, 4))
+        n = len(players)
+        for i, p in enumerate(players):
+            x = 500 + (i - (n - 1) / 2) * min(140, 700 / max(1, n))
+            y = 330
+            if p["card"]:
+                img = self.assets.faces[tuple(p["card"])]
+            elif p["has_card"] and ph in ("dealt",):
+                img = self.assets.back
+            else:
+                img = None
+            if img:
+                bounce = -12 * abs(math.sin(self.t * 3 + i)) if ph == "dealt" else 0
+                surf.blit(img, img.get_rect(center=(x, y + bounce)))
+                if p["out"]:
+                    d = pygame.Surface((CW, CH), pygame.SRCALPHA)
+                    pygame.draw.rect(d, (0, 0, 0, 150), d.get_rect(), border_radius=8)
+                    surf.blit(d, d.get_rect(center=(x, y)))
+            else:
+                pygame.draw.rect(surf, (20, 80, 45), (x - CW / 2, y - CH / 2, CW, CH), 2, border_radius=8)
+            col = GOLD if p["win"] else (WHITE if p["pid"] != self.me() else (140, 220, 255))
+            draw_text(surf, "YOU" if p["pid"] == self.me() else p["name"], fit_font(p["name"], 16, 130), col, (x, y + 84))
+            if p["win"]:
+                draw_pill(surf, "WINNER!", font(14, bold=True), (x, y - 88), (30, 20, 0), (*GOLD, 255), None, pad=(10, 2))
+        if ph == "joining":
+            draw_text(surf, f"JOIN FOR {money(s['ante'])}  -  STARTING IN {max(0, math.ceil(s['timer']))}", font(20, bold=True),
+                      WHITE, (500, 480))
+        elif ph == "dealt":
+            draw_text(surf, "SUDDEN DEATH!" if s.get("sudden") else "FLIPPING IN A MOMENT...", font(22, bold=True), GOLD, (500, 480))
+        if s.get("msg") and ph in ("over", "shown") or (ph == "dealt" and s.get("sudden")):
+            draw_pill(surf, s["msg"], font(16, bold=True), (500, 530), WHITE, (0, 0, 0, 200), GOLD_DARK, pad=(14, 4))
+        rows = [(p["name"], "IN", GOLD, p["pid"] == self.me()) for p in players]
+        self.draw_players(surf, rows, "IN THIS ROUND")
+        label, on = self.pot_button()
+        self.draw_frame(surf, label, on)
+
+
+class LiarsDice(MPGame):
+    key, kind, title = "mp_liars", "liar", "LIAR'S DICE"
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.bg = felt_table((60, 25, 20), (110, 50, 35))
+        self.qty, self.face = 1, 2
+        self.btn_qm = Button((140, 470, 50, 50), "-", (60, 60, 90), 24)
+        self.btn_qp = Button((290, 470, 50, 50), "+", (60, 60, 90), 24)
+        self.face_btns = [Button((360 + i * 58, 470, 52, 50), str(i + 1), (60, 60, 90), 20) for i in range(6)]
+        self.btn_bid = Button((360, 530, 170, 52), "BID", (40, 90, 160), 22)
+        self.btn_liar = Button((540, 530, 170, 52), "LIAR!", (170, 30, 40), 24)
+        self.message = "START A GAME (OR JOIN ONE) - LAST PLAYER WITH DICE TAKES THE POT"
+
+    def my_turn(self):
+        s = self.state or {}
+        return s.get("phase") == "playing" and s.get("turn") == self.me()
+
+    def on_state(self, s):
+        was = self.my_turn()
+        self.state = s
+        if self.my_turn() and not was:
+            b = s.get("bid")
+            if b:                                         # start the picker at the smallest legal raise
+                self.qty, self.face = (b["qty"], b["face"] + 1) if b["face"] < 6 else (b["qty"] + 1, 1)
+            else:
+                self.qty, self.face = 1, 2
+            self.app.sfx("chip")
+
+    def legal(self, qty, face):
+        b = (self.state or {}).get("bid")
+        return 1 <= qty <= (self.state or {}).get("total", 0) and (not b or qty > b["qty"] or (qty == b["qty"] and face > b["face"]))
+
+    def handle(self, e):
+        s = self.state or {}
+        if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            if self.btn_main.rect.collidepoint(e.pos):
+                self.pot_action("liar")
+                return
+            if self.my_turn():
+                if self.btn_qm.clicked(e.pos):
+                    self.qty = max(1, self.qty - 1)
+                elif self.btn_qp.clicked(e.pos):
+                    self.qty = min(s.get("total", 1), self.qty + 1)
+                elif self.btn_bid.clicked(e.pos, self.legal(self.qty, self.face)):
+                    self.send({"t": "liar_bid", "qty": self.qty, "face": self.face})
+                elif self.btn_liar.clicked(e.pos, bool(s.get("bid"))):
+                    self.send({"t": "liar_call"})
+                for i, b in enumerate(self.face_btns):
+                    if b.clicked(e.pos):
+                        self.face = i + 1
+                return
+        super().handle(e)
+
+    def draw(self, surf):
+        mouse = pygame.mouse.get_pos()
+        surf.blit(self.bg, (0, 0))
+        s = self.state or {}
+        ph = s.get("phase", "idle")
+        draw_text(surf, "LIAR'S DICE", font(36, bold=True, serif=True), GOLD, (430, 104), shadow=(0, 0, 0))
+        if s.get("pot"):
+            draw_pill(surf, f"POT  {money(s['pot'])}", font(20, bold=True), (430, 150), GOLD, (0, 0, 0, 200), GOLD_DARK,
+                      pad=(14, 4))
+        b = s.get("bid")
+        if b:
+            draw_text(surf, "CURRENT BID", font(14, bold=True), (230, 210, 190), (430, 198))
+            draw_text(surf, f"{b['qty']} x", font(40, bold=True), WHITE, (390, 240))
+            draw_die_face(surf, b["face"], (470, 240), 50)
+            draw_text(surf, f"by {b['name']}", font(14), (230, 210, 190), (430, 280))
+        elif ph == "playing":
+            draw_text(surf, "NO BID YET", font(20, bold=True), (230, 210, 190), (430, 240))
+        if ph == "joining":
+            draw_text(surf, f"JOIN FOR {money(s['ante'])}  -  STARTING IN {max(0, math.ceil(s['timer']))}", font(20, bold=True),
+                      WHITE, (430, 240))
+        rv = s.get("reveal")
+        if rv and ph == "reveal":
+            draw_pill(surf, f"{rv['caller']} called LIAR on {rv['bidder']}!  There were {dice_count(rv['count'], rv['face'])} "
+                            f"(bid: {rv['qty']})  -  {rv['loser']} loses a die", font(15, bold=True), (430, 320), WHITE,
+                      (120, 20, 30, 230), GOLD, pad=(14, 4))
+        # your dice
+        mine = s.get("mine", [])
+        if mine:
+            draw_text(surf, "YOUR DICE (only you can see them)", font(13, bold=True), (230, 210, 190), (430, 360))
+            for i, v in enumerate(mine):
+                draw_die_face(surf, v, (430 + (i - (len(mine) - 1) / 2) * 62, 410), 50)
+        if self.my_turn():
+            left = max(0, math.ceil(s.get("turn_t", 0)))
+            draw_text(surf, f"YOUR TURN ({left}s)  -  pick how many, and which face:", font(14, bold=True), GOLD, (60, 452),
+                      anchor="midleft")
+            self.btn_qm.draw(surf, mouse)
+            self.btn_qp.draw(surf, mouse)
+            draw_text(surf, str(self.qty), font(28, bold=True), WHITE, (240, 495))
+            for i, btn in enumerate(self.face_btns):
+                btn.color = (200, 150, 30) if self.face == i + 1 else (60, 60, 90)
+                btn.draw(surf, mouse)
+            self.btn_bid.text = f"BID {self.qty} x {self.face}"
+            self.btn_bid.draw(surf, mouse, self.legal(self.qty, self.face))
+            self.btn_liar.draw(surf, mouse, bool(b))
+        # the table log
+        log = s.get("log", [])
+        box = pygame.Rect(W - 300, 380, 280, 210)
+        soft_panel(surf, box, 170, (140, 90, 70))
+        draw_text(surf, "WHAT'S HAPPENED", font(13, bold=True), GOLD, (box.x + 14, box.y + 18), anchor="midleft")
+        for i, line in enumerate(log[-6:]):
+            draw_text(surf, line, fit_font(line, 13, box.w - 28, bold=False), (230, 220, 210), (box.x + 14, box.y + 44 + i * 28),
+                      anchor="midleft")
+        rows = []
+        for p in s.get("players", []):
+            detail = f"{p['n']} dice" if ph != "joining" else "IN"
+            if p.get("dice"):
+                detail = " ".join(str(v) for v in p["dice"])
+            col = (240, 120, 120) if (ph not in ("joining",) and p["n"] == 0) else GOLD
+            rows.append((("> " if s.get("turn") == p["pid"] else "") + p["name"], detail, col, p["pid"] == self.me()))
+        self.draw_players(surf, rows[:6], "PLAYERS")
+        if s.get("msg") and ph == "over":
+            draw_pill(surf, s["msg"], font(16, bold=True), (430, 560), WHITE, (0, 0, 0, 210), GOLD_DARK, pad=(14, 4))
+        label, on = self.pot_button()
+        self.draw_frame(surf, label, on)
+
+
+class BingoNight(MPGame):
+    key, kind, title = "mp_bingo", "bingo", "BINGO NIGHT"
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.btn_bingo = Button((BINGO_CX - 110, 520, 220, 60), "BINGO!", (200, 40, 90), 30)
+        self.message = "START A GAME (OR JOIN ONE) - FIRST TO GET A LINE AND CALL BINGO WINS"
+
+    def can_bingo(self):
+        s = self.state or {}
+        return s.get("phase") == "calling" and s.get("card") and bingo_lines(s["card"], s.get("called", []))
+
+    def handle(self, e):
+        if (e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and self.btn_bingo.clicked(e.pos, bool(self.can_bingo()))) or \
+                (e.type == pygame.KEYDOWN and e.key == pygame.K_b and self.can_bingo()):
+            self.send({"t": "bingo_claim"})
+            return
+        if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and self.btn_main.rect.collidepoint(e.pos):
+            self.pot_action("bingo")
+            return
+        super().handle(e)
+
+    def draw(self, surf):
+        mouse = pygame.mouse.get_pos()
+        surf.blit(self.bg, (0, 0))
+        s = self.state or {}
+        ph = s.get("phase", "idle")
+        called = s.get("called", [])
+        cset = set(called)
+        # your card
+        card = s.get("card")
+        cx0, cy0, cell = 70, 110, 78
+        for c, letter in enumerate("BINGO"):
+            draw_text(surf, letter, font(34, bold=True, serif=True), GOLD, (cx0 + c * cell + cell / 2, cy0 - 26))
+        for r in range(5):
+            for c in range(5):
+                rect = pygame.Rect(cx0 + c * cell, cy0 + r * cell, cell - 6, cell - 6)
+                pygame.draw.rect(surf, (250, 248, 240), rect, border_radius=10)
+                if not card:
+                    continue
+                n = card[r][c]
+                marked = n == 0 or n in cset
+                if marked:
+                    pygame.draw.circle(surf, (230, 40, 110), rect.center, cell * 0.36)
+                draw_text(surf, "FREE" if n == 0 else str(n), font(15 if n == 0 else 26, bold=True),
+                          WHITE if marked else (40, 30, 60), rect.center)
+        if not card:
+            draw_text(surf, "BUY A CARD TO PLAY", font(22, bold=True), (140, 120, 170), (cx0 + 2.5 * cell, cy0 + 2.5 * cell))
+        # the caller
+        last = called[-1] if called else None
+        if last:
+            letter = "BINGO"[(last - 1) // 15]
+            pygame.draw.circle(surf, (255, 250, 240), (BINGO_CX, 200), 70)
+            pygame.draw.circle(surf, (230, 40, 110), (BINGO_CX, 200), 70, 8)
+            draw_text(surf, letter, font(24, bold=True), (230, 40, 110), (BINGO_CX, 165))
+            draw_text(surf, str(last), font(56, bold=True), (40, 30, 60), (BINGO_CX, 215))
+        draw_text(surf, f"{len(called)} CALLED", font(14, bold=True), (200, 190, 230), (BINGO_CX, 290))
+        for i, n in enumerate(called[-12:-1][::-1]):
+            draw_pill(surf, str(n), font(13, bold=True), (BINGO_CX - 90 + (i % 4) * 60, 330 + (i // 4) * 34), (40, 30, 60),
+                      (245, 240, 230, 255), None, pad=(8, 2))
+        if ph == "joining":
+            draw_text(surf, f"CARDS COST {money(s['ante'])}  -  CALLING STARTS IN {max(0, math.ceil(s['timer']))}",
+                      font(16, bold=True), WHITE, (BINGO_CX, 470))
+        if s.get("pot"):
+            draw_pill(surf, f"POT  {money(s['pot'])}", font(20, bold=True), (BINGO_CX, 100), GOLD, (0, 0, 0, 200), GOLD_DARK, pad=(14, 4))
+        if ph == "calling" and card:
+            ready = self.can_bingo()
+            if ready:
+                glow = pygame.Surface((260, 100), pygame.SRCALPHA)
+                pygame.draw.rect(glow, (255, 80, 150, int(90 + 70 * math.sin(self.t * 8))), glow.get_rect(), border_radius=30)
+                surf.blit(glow, (self.btn_bingo.rect.x - 20, self.btn_bingo.rect.y - 20))
+            self.btn_bingo.draw(surf, mouse, bool(ready))
+        if s.get("msg") and ph == "over":
+            draw_pill(surf, s["msg"], font(16, bold=True), (BINGO_CX, 480), WHITE, (0, 0, 0, 210), GOLD_DARK, pad=(14, 4))
+        rows = [(p["name"], "PLAYING", GOLD, p["pid"] == self.me()) for p in s.get("players", [])]
+        self.draw_players(surf, rows, "CARDS BOUGHT")
+        label, on = self.pot_button()
+        self.draw_frame(surf, label.replace("START FOR", "START BINGO:").replace("JOIN FOR", "BUY A CARD:"), on)
+
+
+def art_party(kind):
+    def make(w, h):
+        k = 2
+        s = pygame.Surface((w * k, h * k), pygame.SRCALPHA)
+        top, bottom = {"crash": ((40, 30, 90), (10, 8, 30)), "hc": ((25, 100, 60), (8, 40, 24)),
+                       "liar": ((110, 45, 30), (40, 15, 10)), "bingo": ((120, 40, 120), (40, 10, 50))}[kind]
+        for y in range(h * k):
+            pygame.draw.line(s, lerp_col(top, bottom, y / (h * k)), (0, y), (w * k, y))
+        cx, cy = w * k / 2, h * k / 2
+        if kind == "crash":
+            pts = [(40 + x * 7, h * k - 30 - (math.exp(x / 22) - 1) * 7) for x in range(90)]
+            pygame.draw.lines(s, (120, 240, 160), False, pts, 6)
+            x, y = pts[-1]
+            pygame.draw.polygon(s, (235, 235, 245), [(x + 30, y - 20), (x - 20, y - 8), (x - 10, y + 20)])
+            for i in range(4):
+                pygame.draw.circle(s, [(80, 160, 255), (255, 120, 90), (120, 230, 120), (255, 210, 80)][i],
+                                   (70 + i * 50, 60), 18)
+            draw_text(s, "x3.47", font(h * k * 0.22, bold=True), (120, 240, 160), (w * k * 0.72, h * k * 0.55), shadow=(0, 0, 0))
+        elif kind == "hc":
+            faces = [("A", "S"), ("K", "H"), ("7", "D")]
+            for i, card in enumerate(faces):
+                img = pygame.transform.rotozoom(make_card_face(*card), (i - 1) * -12, 1.4)
+                s.blit(img, img.get_rect(center=(cx + (i - 1) * 150, cy + abs(i - 1) * 16)))
+        elif kind == "liar":
+            for i, v in enumerate((5, 5, 2, 6, 5)):
+                draw_die_face(s, v, (cx - 200 + i * 100, cy + 40), 80)
+            draw_text(s, "LIAR!", font(h * k * 0.26, bold=True, serif=True), (255, 90, 80), (cx, cy - 70), shadow=(0, 0, 0))
+        else:
+            for i, (n, letter) in enumerate(((7, "B"), (22, "I"), (41, "N"), (58, "G"), (66, "O"))):
+                x = cx - 280 + i * 140
+                pygame.draw.circle(s, (255, 250, 240), (x, cy), 56)
+                pygame.draw.circle(s, (230, 40, 110), (x, cy), 56, 8)
+                draw_text(s, letter, font(26, bold=True), (230, 40, 110), (x, cy - 24))
+                draw_text(s, str(n), font(40, bold=True), (40, 30, 60), (x, cy + 14))
+        draw_text(s, "PARTY", font(h * k * 0.1, bold=True), (255, 220, 120), (w * k - 70, 28), shadow=(0, 0, 0))
+        return pygame.transform.smoothscale(s, (w, h))
+    return make
+
+
+# --------------------------------------------------------------------------
 # Lobby / menu
 # --------------------------------------------------------------------------
 def art_blackjack(assets, w, h):
@@ -16732,13 +17755,19 @@ GAME_INFO = {       # scene -> (title, one-line description)
     "pinball": ("PINBALL", "Real flippers and bumpers. Score big to win big!"),
     "crossy": ("CHICKEN CROSSING", "Hop across an endless road. Cash out before you get hit!"),
     "yesno": ("YES OR NO", "A new question to bet on every 30 seconds."),
+    "mp_crash": ("CRASH PARTY", "Everyone rides one rocket. Last one out gets a bonus!"),
+    "mp_highcard": ("HIGH CARD SHOWDOWN", "One card each - the highest card takes the whole pot."),
+    "mp_liars": ("LIAR'S DICE", "Bluff about your hidden dice. Last player with dice wins."),
+    "mp_bingo": ("BINGO NIGHT", "Everyone buys a card. First to call BINGO takes the pot!"),
 }
 NON_GAMES = {"counting"}        # lobby entries that aren't betting games (no stats, not needed for Grand Tour)
+MP_ONLY = {"mp_crash", "mp_highcard", "mp_liars", "mp_bingo"}      # need a multiplayer game (not needed for Grand Tour)
 CATEGORIES = [("CARDS", ["blackjack", "poker", "baccarat", "videopoker", "bus", "dragontiger"]),
               ("TABLE & DICE", ["roulette", "craps", "sicbo", "wheel", "cups", "coinflip"]),
               ("INSTANT WIN", ["slots", "rocket", "plinko", "mines", "scratch", "keno"]),
               ("ARCADE", ["crossy", "pinball", "deepdive", "pusher"]),
               ("SPECIAL", ["yesno", "horses", "stocks", "lottery"]),
+              ("PARTY", ["mp_crash", "mp_highcard", "mp_liars", "mp_bingo"]),
               ("LEARN", ["counting"])]
 DAILY_MAX = 1000
 
@@ -16767,6 +17796,8 @@ class Menu:
             "counting": lambda: art_counting(a, aw, ah), "pinball": lambda: art_pinball(aw, ah),
             "crossy": lambda: art_crossy(aw, ah), "cups": lambda: art_cups(aw, ah),
             "pusher": lambda: art_pusher(aw, ah), "coinflip": lambda: art_coinflip(aw, ah), "yesno": lambda: art_yesno(aw, ah),
+            "mp_crash": lambda: art_party("crash")(aw, ah), "mp_highcard": lambda: art_party("hc")(aw, ah),
+            "mp_liars": lambda: art_party("liar")(aw, ah), "mp_bingo": lambda: art_party("bingo")(aw, ah),
         }
         self.art = {}
         for key, make in makers.items():
@@ -16987,7 +18018,10 @@ class Menu:
             if self.app.net and key in ("poker", "blackjack"):
                 desc = ("LIVE TABLE - your friends replace the computers." if key == "poker"
                         else "LIVE TABLE - play together against the dealer.")
-            draw_text(surf, title, font(23, bold=True, serif=True), GOLD, (r.x + 18, r.y + 154), anchor="midleft")
+            size = 23
+            while size > 14 and font(size, bold=True, serif=True).size(title)[0] > r.w - 120:      # keep clear of PLAY
+                size -= 1
+            draw_text(surf, title, font(size, bold=True, serif=True), GOLD, (r.x + 18, r.y + 154), anchor="midleft")
             draw_text(surf, desc, font(14), (215, 205, 185), (r.x + 18, r.y + 182), anchor="midleft")
             draw_pill(surf, "LEARN" if key in NON_GAMES else "PLAY", font(15, bold=True), (r.right - 50, r.y + 154), WHITE,
                       (30, 150, 70, 255) if hover else (25, 115, 55, 255), GOLD, pad=(16, 4))
@@ -17264,7 +18298,7 @@ class ProfileOverlay:
         for name, x, anc in cols:
             draw_text(surf, name, font(12, bold=True), GOLD, (x, y0), anchor=anc)
         pygame.draw.line(surf, GOLD_DARK, (r.x + 30, y0 + 12), (r.right - 30, y0 + 12))
-        keys = [k for _, ks in CATEGORIES for k in ks if k not in NON_GAMES]
+        keys = [k for _, ks in CATEGORIES for k in ks if k not in NON_GAMES and k not in MP_ONLY]
         for i, key in enumerate(keys):
             y = y0 + 30 + i * 21
             v = st.get(key)
@@ -17742,6 +18776,45 @@ HELP = {
         ("b", "Blackjack pays 3 to 2 and the dealer stands on all 17s. (Splitting isn't available at the "
               "multiplayer table.)"),
     ]),
+    "mp_crash": ("CRASH PARTY", [
+        ("h", "One rocket for everyone"),
+        ("p", "A party game - you need to be in a multiplayer game. Everyone bets on the same rocket, and "
+              "everyone sees who's still riding."),
+        ("b", "Set your bet with the chips and press BET before the rocket launches (10 seconds between rounds)."),
+        ("b", "The multiplier climbs while it flies. Press CASH OUT (Space) to take your bet times the multiplier."),
+        ("b", "If it blows up before you cash out, you lose your bet."),
+        ("b", "LAST ONE OUT: whoever cashes out at the highest multiplier gets 20% extra on top of their profit."),
+        ("x", "Bet $100, cash out at x2.50  ->  you get $250. Last one out  ->  +$30 bonus."),
+    ]),
+    "mp_highcard": ("HIGH CARD SHOWDOWN", [
+        ("h", "Highest card wins"),
+        ("p", "A party game - you need to be in a multiplayer game. Everyone puts in the same amount and "
+              "gets one card. The highest card takes the whole pot."),
+        ("b", "Set an amount with the chips and press START. The others have 12 seconds to JOIN for the same amount."),
+        ("b", "Aces are high, 2s are low. Suits don't matter."),
+        ("b", "A tie at the top means SUDDEN DEATH: the tied players get a new card each until someone wins."),
+        ("b", "If nobody joins, you get your chips back."),
+    ]),
+    "mp_liars": ("LIAR'S DICE", [
+        ("h", "Bluffing with dice"),
+        ("p", "A party game - you need to be in a multiplayer game. Everyone pays in the same amount and "
+              "rolls 5 dice that only they can see. The last player with dice left takes the pot."),
+        ("b", "On your turn, bid how many dice of one face you think there are on the WHOLE table - "
+              "like 'four 5s'. Each bid must be higher: more dice, or the same number of a bigger face."),
+        ("b", "Or, if you think the last bid is too high, call LIAR! Everyone shows their dice."),
+        ("b", "If there are at least as many as the bid said, the caller loses a die. If not, the bidder loses one."),
+        ("b", "Everyone re-rolls and a new round starts. Lose all your dice and you're out."),
+        ("b", "You have 30 seconds per turn - if you run out, LIAR is called for you."),
+    ]),
+    "mp_bingo": ("BINGO NIGHT", [
+        ("h", "Eyes down"),
+        ("p", "A party game - you need to be in a multiplayer game. Everyone buys a card for the same price, "
+              "and the first to finish a line takes the whole pot."),
+        ("b", "Set a price with the chips and press START. Others have 12 seconds to buy a card too."),
+        ("b", "A number is called every 3 seconds and marked on your card for you. The middle square is free."),
+        ("b", "When you have a full row, column or diagonal, press BINGO! (or B) - fast! "
+              "If you don't, it's called for you after a few seconds, but someone else might beat you."),
+    ]),
     "coinflip": ("COIN FLIP", [
         ("h", "Call it"),
         ("b", "Click chips to set your bet."),
@@ -18101,7 +19174,8 @@ class App:
                        "netpoker": NetPoker(self), "netbj": NetBlackjack(self), "online": Online(self),
                        "settings": Settings(self), "title": Title(self),
                        "pusher": Pusher(self, self.saved.get("pusher")), "coinflip": CoinFlip(self),
-                       "account": AccountScreen(self)}
+                       "account": AccountScreen(self), "mp_crash": CrashParty(self),
+                       "mp_highcard": HighCardShowdown(self), "mp_liars": LiarsDice(self), "mp_bingo": BingoNight(self)}
         self.games = list(self.scenes.values())
         self.profile = ProfileOverlay(self)
         self.scene = "title"            # the game opens on the main menu
@@ -18357,7 +19431,7 @@ class App:
             st["best"] = max(st["best"], returned - stake)
             self.unlock("first_win")
         self.played.add(game)
-        if all(k in self.played for k in GAME_INFO if k not in NON_GAMES):
+        if all(k in self.played for k in GAME_INFO if k not in NON_GAMES and k not in MP_ONLY):
             self.unlock("tourist")
         if self.net:
             self.net.send({"t": "result", "game": game, "stake": int(stake), "returned": int(returned)})
@@ -18450,6 +19524,12 @@ class App:
         """Open a game from the lobby. When you're online, poker and blackjack use the shared tables."""
         if self.net and key in ("poker", "blackjack"):
             key = "netpoker" if key == "poker" else "netbj"
+        if key in MP_ONLY and not self.net:
+            if WEB:
+                self.effects.toast("PARTY GAMES NEED MULTIPLAYER", "Multiplayer is only in the downloaded game")
+                return
+            self.effects.toast("PARTY GAMES NEED MULTIPLAYER", "Host a game or join a friend's, then pick a party game")
+            key = "online"
         self.scene = key
 
     def host_game(self):
@@ -18478,7 +19558,7 @@ class App:
         return ""
 
     def leave_game(self, why=None):
-        for key in ("netpoker", "netbj"):
+        for key in ("netpoker", "netbj", *MP_KINDS.values()):
             self.scenes[key].lost()          # take back any chips still on the shared tables
         if self.net:
             self.net.close()
@@ -18486,7 +19566,7 @@ class App:
         if self.net_server:
             self.net_server.close()
             self.net_server = None
-        if self.scene in ("netpoker", "netbj"):
+        if self.scene in ("netpoker", "netbj", *MP_KINDS.values()):
             self.scene = "menu"
         self.chat_open = False
         self.chat_text = ""
@@ -18704,7 +19784,7 @@ class App:
 
     def draw_others(self, surf):
         """Other players in the same game: their bets and their latest win or loss."""
-        if not self.net or self.scene in ("menu", "title", "online", "netpoker", "netbj", "work", "counting"):
+        if not self.net or self.scene in ("menu", "title", "online", "netpoker", "netbj", "work", "counting", *MP_ONLY):
             return
         here = self.net.others(self.scene)
         if not here:
