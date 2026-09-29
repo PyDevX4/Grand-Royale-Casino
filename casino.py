@@ -2841,8 +2841,9 @@ class Market:
         del self.news[8:]
         away = time.time() - when > 5
         self.alerts.append({"title": ("WHILE YOU WERE AWAY: " if away else "") + ("MEGA EVENT: " if mega else "") + title,
-                            "sub": f"{sub}  ({detail})", "kind": "up" if avg > 0 else "down"})
-        del self.alerts[:-3]
+                            "sub": f"{sub}  ({detail})", "kind": "up" if avg > 0 else "down", "away": away,
+                            "syms": [sym for sym, _ in moves]})
+        del self.alerts[:-12]
 
     # ---- 5-minute higher / lower bets ------------------------------------------
     def place_bet(self, sym, direction, amount, now=None):
@@ -10639,7 +10640,9 @@ class Crossy(StakeGame):
             grass = {"winter": ((232, 240, 250), (220, 232, 245)), "christmas": ((232, 240, 250), (220, 232, 245)),
                      "halloween": ((74, 110, 58), (66, 100, 52)), "easter": ((130, 210, 110), (120, 200, 100)),
                      "summer": ((236, 214, 150), (226, 204, 140)), "fall": ((176, 140, 70), (166, 130, 62)),
-                     "stpatricks": ((90, 190, 80), (80, 180, 72)), "spring": ((140, 215, 120), (130, 205, 110))
+                     "stpatricks": ((90, 190, 80), (80, 180, 72)), "spring": ((140, 215, 120), (130, 205, 110)),
+                     "thunderdome": ((40, 22, 72), (34, 18, 62)), "basscanyon": ((196, 120, 72), (186, 110, 64)),
+                     "lostlands": ((70, 140, 60), (62, 130, 54))
                      }.get(CURRENT_THEME, ((104, 186, 76), (96, 176, 70)))
             pygame.draw.rect(surf, grass[0] if r % 2 else grass[1], (0, top, W, CR_T + 1))
             for c in (0, CR_COLS - 1):
@@ -10699,7 +10702,8 @@ class Crossy(StakeGame):
         mouse = pygame.mouse.get_pos()
         surf.fill({"winter": (220, 232, 245), "christmas": (220, 232, 245), "halloween": (66, 100, 52),
                    "easter": (120, 200, 100), "summer": (226, 204, 140), "fall": (166, 130, 62),
-                   "stpatricks": (80, 180, 72), "spring": (130, 205, 110)}.get(CURRENT_THEME, (96, 176, 70)))
+                   "stpatricks": (80, 180, 72), "spring": (130, 205, 110), "thunderdome": (34, 18, 62),
+                   "basscanyon": (186, 110, 64), "lostlands": (62, 130, 54)}.get(CURRENT_THEME, (96, 176, 70)))
         surf.set_clip(pygame.Rect(0, 56, W, 574))
         lo = max(0, int(self.cam) - 2)
         hi = min(len(self.rows), int(self.cam) + 10)
@@ -15235,14 +15239,18 @@ EVENT_POLL = 15.0                # seconds between checks for the owner's switch
 RAIN_VALUES = [10, 25, 50, 100, 250, 500, 1000]
 RAIN_WEIGHTS = [30, 25, 18, 12, 8, 5, 2]
 THEMES = ["halloween", "fall", "christmas", "winter", "valentines", "stpatricks", "spring", "easter", "summer",
-          "anniversary"]
+          "anniversary", "thunderdome", "basscanyon", "lostlands"]
 THEME_NAMES = {"halloween": "HALLOWEEN", "fall": "FALL", "christmas": "CHRISTMAS", "winter": "WINTER",
                "valentines": "VALENTINE'S", "stpatricks": "ST. PATRICK'S", "spring": "SPRING", "easter": "EASTER",
-               "summer": "SUMMER", "anniversary": "ANNIVERSARY", "": "NONE"}
+               "summer": "SUMMER", "anniversary": "ANNIVERSARY", "thunderdome": "THUNDERDOME",
+               "basscanyon": "BASS CANYON", "lostlands": "LOST LANDS", "": "NONE"}
 THEME_GREETING = {"halloween": "HAPPY HALLOWEEN!", "fall": "HAPPY FALL!", "christmas": "MERRY CHRISTMAS!",
                   "winter": "WINTER WONDERLAND!", "valentines": "HAPPY VALENTINE'S DAY!",
                   "stpatricks": "HAPPY ST. PATRICK'S DAY!", "spring": "HELLO SPRING!", "easter": "HAPPY EASTER!",
-                  "summer": "SUMMER VIBES!", "anniversary": "HAPPY ANNIVERSARY, GRAND ROYALE!"}
+                  "summer": "SUMMER VIBES!", "anniversary": "HAPPY ANNIVERSARY, GRAND ROYALE!",
+                  "thunderdome": "WELCOME TO THUNDERDOME!", "basscanyon": "WELCOME TO BASS CANYON!",
+                  "lostlands": "WELCOME TO LOST LANDS!"}
+SEASON_ONLY = {"fall", "spring", "winter"}  # times of year, not holidays: no tint, and the games keep their normal pieces
 THEME_LOOK = {   # colour grade (multiply, then add) and the accent colour
     "halloween": ((255, 200, 170), (16, 2, 20), (255, 140, 20)),
     "winter": ((205, 222, 255), (10, 14, 26), (170, 220, 255)),
@@ -15254,6 +15262,9 @@ THEME_LOOK = {   # colour grade (multiply, then add) and the accent colour
     "anniversary": ((255, 240, 215), (18, 10, 24), (240, 200, 90)),
     "fall": ((255, 220, 180), (22, 10, 0), (235, 130, 40)),
     "spring": ((240, 255, 235), (12, 16, 10), (255, 160, 200)),
+    "thunderdome": ((190, 195, 255), (6, 4, 22), (0, 230, 255)),
+    "basscanyon": ((255, 215, 190), (20, 6, 14), (255, 140, 40)),
+    "lostlands": ((215, 255, 205), (6, 14, 8), (120, 255, 110)),
 }
 
 
@@ -15677,9 +15688,11 @@ def draw_extra(surf, name, e, t):
 
 
 EXTRA_COUNT = {"halloween": 3, "winter": 7, "valentines": 4, "easter": 5, "summer": 4, "christmas": 1,
-               "stpatricks": 6, "anniversary": 6, "fall": 1, "spring": 4}
+               "stpatricks": 6, "anniversary": 6, "fall": 1, "spring": 4, "thunderdome": 5, "basscanyon": 3,
+               "lostlands": 3}
 PART_COUNT = {"winter": 110, "halloween": 9, "valentines": 22, "easter": 26, "summer": 30, "christmas": 110,
-              "stpatricks": 24, "anniversary": 60, "fall": 30, "spring": 40}
+              "stpatricks": 24, "anniversary": 60, "fall": 30, "spring": 40, "thunderdome": 40, "basscanyon": 40,
+              "lostlands": 30}
 SWAYING = ("winter", "christmas", "easter", "fall", "spring", "stpatricks")        # blown about by the wind
 
 
@@ -15707,6 +15720,8 @@ class ThemeFX:
         self.overlay = self.backdrop = self.corners = None
         if not name:
             return
+        if name in FESTIVALS and not getattr(self, "fx", None):
+            self.fx = pygame.Surface((W, H), pygame.SRCALPHA)
         self.backdrop = make_backdrop(name)
         self.corners = make_corners(name)
         for _ in range(EXTRA_COUNT[name]):
@@ -15754,7 +15769,7 @@ class ThemeFX:
         name = self.current()
         if name != self.name:
             self.reset(name)
-        CURRENT_THEME = self.name                 # the games dress their pieces up for the season
+        CURRENT_THEME = "" if self.name in SEASON_ONLY else self.name    # the games dress their pieces up for holidays
         for i, p in enumerate(self.parts):
             p["x"] += (p["vx"] + (math.sin(self.t * 1.3 + p["ph"]) * 18 if self.name in SWAYING else 0)) * dt
             p["y"] += p["vy"] * dt
@@ -15781,16 +15796,24 @@ class ThemeFX:
         if not self.name:
             return
         mult, add, accent = THEME_LOOK[self.name]
-        surf.fill(mult, special_flags=pygame.BLEND_RGB_MULT)
-        surf.fill(add, special_flags=pygame.BLEND_RGB_ADD)
-        surf.blit(self.overlay, (0, 0))
-        if scene not in ("title", "menu"):
-            surf.blit(self.corners, (0, 0))
+        season = self.name in SEASON_ONLY           # just falling snow / leaves / petals in the games
+        in_game = scene not in ("title", "menu")
+        if not season:
+            surf.fill(mult, special_flags=pygame.BLEND_RGB_MULT)
+            surf.fill(add, special_flags=pygame.BLEND_RGB_ADD)
+            surf.blit(self.overlay, (0, 0))
+            if in_game:
+                surf.blit(self.corners, (0, 0))
+        if self.name in FESTIVALS:                       # the light show (softer while you're playing)
+            self.fx.fill((0, 0, 0, 0))
+            festival_show(self.fx, self.name, self.t, not in_game)
+            surf.blit(self.fx, (0, 0))
         for p in self.parts:
             self.draw_part(surf, p)
-        for e in self.extras:
-            draw_extra(surf, self.name, e, self.t)
-        self.draw_garland(surf, 0 if scene == "title" else 56)
+        if not (season and in_game):
+            for e in self.extras:
+                draw_extra(surf, self.name, e, self.t)
+            self.draw_garland(surf, 0 if scene == "title" else 56)
         if self.name == "halloween" and scene != "title":             # a spider going up and down its thread
             sy = 56 + 70 + math.sin(self.t * 0.9) * 40
             sx = 64
@@ -15914,7 +15937,6 @@ class OwnerMenu:
         self.focus = None            # which box is being typed in: "money", "search" or "amount"
         self.money_text = ""
         self.minutes = {"double": 10, "rain": 5}
-        self.scope = "everyone"
         P = self.PANEL
         self.tab_btns = [(Button((P.x + 40 + i * 214, P.y + 84, 204, 44), label, (60, 50, 90), 16), key)
                          for i, (key, label) in enumerate((("events", "CHIPS & EVENTS"), ("themes", "THEMES"),
@@ -15931,11 +15953,10 @@ class OwnerMenu:
                             "plus": Button((P.x + 470, y, 44, 48), "+", (60, 60, 90), 22),
                             "start": Button((P.x + 540, y, 150, 48), "START", (25, 120, 60), 18),
                             "stop": Button((P.x + 700, y, 110, 48), "STOP", (150, 35, 40), 18), "y": y}
-        # THEMES
-        self.scope_btns = [(Button((P.x + 40 + i * 190, P.y + 178, 180, 44), label, (40, 60, 110), 15), s)
-                           for i, (label, s) in enumerate((("EVERYONE", "everyone"), ("JUST ME", "me")))]
-        self.theme_btns = [(Button((P.x + 40 + (i % 4) * 226, P.y + 290 + (i // 4) * 70, 214, 56), THEME_NAMES[t],
-                                   (70, 60, 100), 17), t) for i, t in enumerate([""] + THEMES)]
+        # THEMES: one dropdown for everyone, one just for me
+        self.drop = None             # the dropdown that's open: "everyone" or "me"
+        self.drop_boxes = {"everyone": pygame.Rect(P.x + 190, P.y + 176, 400, 54),
+                           "me": pygame.Rect(P.x + 190, P.y + 256, 400, 54)}
         # PLAYERS
         self.players = None          # [{"username", "balance", "updated_at"}] once loaded
         self.list_flow = None
@@ -15992,7 +16013,9 @@ class OwnerMenu:
     def handle(self, e):
         app, ev = self.app, self.app.events
         if e.type == pygame.KEYDOWN:
-            if e.key in (pygame.K_BACKQUOTE, pygame.K_ESCAPE):
+            if e.key == pygame.K_ESCAPE and self.drop:
+                self.drop = None
+            elif e.key in (pygame.K_BACKQUOTE, pygame.K_ESCAPE):
                 self.active = False
             elif self.focus:
                 text = {"money": self.money_text, "search": self.search, "amount": self.amount}[self.focus]
@@ -16024,6 +16047,13 @@ class OwnerMenu:
             return
         pos = e.pos
         self.focus = None
+        if self.drop:                                   # a dropdown is open: pick from it (or click away to close)
+            for rect, value in self.options(self.drop):
+                if rect.collidepoint(pos):
+                    self.pick_theme(self.drop, value)
+                    break
+            self.drop = None
+            return
         if self.btn_close.clicked(pos):
             self.active = False
             return
@@ -16057,19 +16087,9 @@ class OwnerMenu:
                 elif row["stop"].clicked(pos, not busy):
                     ev.owner_action("casino_owner_event", {"which": k, "seconds": 0}, f"{EVENT_NAMES[k]} STOPPED")
         elif self.tab == "themes":
-            for b, s in self.scope_btns:
-                if b.clicked(pos):
-                    self.scope = s
-            for b, t in self.theme_btns:
-                if b.clicked(pos, not busy or self.scope == "me"):
-                    if self.scope == "me":
-                        app.theme_mine = t or "none"
-                        app.save()
-                        ev.owner_msg = f"THEME FOR YOU ONLY: {THEME_NAMES[t]}"
-                    else:
-                        app.theme_mine = ""
-                        app.save()
-                        ev.owner_action("casino_owner_theme", {"new_theme": t}, f"THEME FOR EVERYONE: {THEME_NAMES[t]}")
+            for which, box in self.drop_boxes.items():
+                if box.collidepoint(pos) and not (which == "everyone" and busy):
+                    self.drop = which
         else:
             if self.search_box.collidepoint(pos):
                 self.focus = "search"
@@ -16090,6 +16110,39 @@ class OwnerMenu:
                         self.pick, self.amount = name, ""
                         self.focus = "amount"
                         return
+
+    def options(self, which):
+        """The open dropdown's choices, laid out in three columns under its box."""
+        values = ([] if which == "everyone" else ["same"]) + [""] + THEMES
+        box = self.drop_boxes[which]
+        rows = (len(values) + 2) // 3
+        return [(pygame.Rect(box.x + (i // rows) * 252, box.bottom + 6 + (i % rows) * 36, 244, 32), v)
+                for i, v in enumerate(values)]
+
+    def pick_theme(self, which, value):
+        app, ev = self.app, self.app.events
+        if which == "everyone":
+            if value != ev.theme:
+                ev.owner_action("casino_owner_theme", {"new_theme": value}, f"EVERYONE NOW SEES: {THEME_NAMES[value]}")
+        else:
+            app.theme_mine = "" if value == "same" else (value or "none")
+            app.save()
+            ev.owner_msg = "YOU SEE THE SAME AS EVERYONE" if value == "same" else f"YOU SEE: {THEME_NAMES[value]}"
+
+    def mine_label(self):
+        mine = self.app.theme_mine
+        if not mine:
+            return "same", f"SAME AS EVERYONE ({THEME_NAMES.get(self.app.events.theme, 'NONE')})"
+        t = "" if mine == "none" else mine
+        return t, THEME_NAMES.get(t, "NONE")
+
+    def draw_choice(self, surf, rect, theme, label, lit, hover, size=17):
+        pygame.draw.rect(surf, (200, 150, 30) if lit else ((60, 50, 90) if hover else (34, 28, 48)), rect, border_radius=9)
+        pygame.draw.rect(surf, GOLD if lit or hover else (90, 80, 115), rect, width=2, border_radius=9)
+        if theme and theme != "same":
+            theme_icon(surf, theme, rect.x + 22, rect.centery, min(13, rect.h * 0.38))
+        draw_text(surf, label, fit_font(label, size, rect.w - 60), (30, 15, 5) if lit else WHITE,
+                  (rect.x + 44, rect.centery), anchor="midleft")
 
     def set_money(self):
         if self.money_text:
@@ -16148,21 +16201,30 @@ class OwnerMenu:
                 row["start"].draw(surf, mouse, not busy)
                 row["stop"].draw(surf, mouse, not busy and on)
         elif self.tab == "themes":
-            draw_text(surf, "WHO SEES IT", font(16, bold=True), GOLD, (P.x + 40, P.y + 162), anchor="midleft")
-            for b, s in self.scope_btns:
-                b.color = (200, 150, 30) if s == self.scope else (40, 60, 110)
-                b.draw(surf, mouse)
-            mine = app.theme_mine
-            now = f"everyone: {THEME_NAMES.get(ev.theme, 'NONE')}" + (
-                f"   |   just you: {THEME_NAMES.get('' if mine == 'none' else mine, 'NONE')}" if mine else "")
-            draw_text(surf, now, font(14), (190, 180, 200), (P.x + 440, P.y + 200), anchor="midleft")
-            draw_text(surf, "SEASON", font(16, bold=True), GOLD, (P.x + 40, P.y + 266), anchor="midleft")
-            current = app.themefx.current()
-            for b, t in self.theme_btns:
-                b.color = (200, 150, 30) if t == current else (70, 60, 100)
-                b.draw(surf, mouse, not busy or self.scope == "me")
-                if t:
-                    theme_icon(surf, t, b.rect.x + 26, b.rect.centery, 13)
+            mine_theme, mine_text = self.mine_label()
+            rows = (("everyone", "EVERYONE:", ev.theme, THEME_NAMES.get(ev.theme, "NONE"),
+                     "what every player's game shows"),
+                    ("me", "ME:", mine_theme, mine_text, "only on your game"))
+            for which, label, theme, text, hint in rows:
+                box = self.drop_boxes[which]
+                off = which == "everyone" and busy
+                draw_text(surf, label, font(20, bold=True), GOLD, (P.x + 40, box.centery), anchor="midleft")
+                self.draw_choice(surf, box, theme, text + ("  (sending...)" if off else ""), False,
+                                 box.collidepoint(mouse) and not self.drop, 19)
+                ax, ay = box.right - 24, box.centery                 # the dropdown arrow
+                pygame.draw.polygon(surf, GOLD, [(ax - 8, ay - 4), (ax + 8, ay - 4), (ax, ay + 6)])
+                draw_text(surf, hint, font(13), (160, 150, 180), (box.right + 16, box.centery), anchor="midleft")
+            draw_text(surf, "Pick a theme for everyone, and a different one for yourself if you like.", font(14),
+                      (170, 160, 190), (P.x + 40, P.y + 360), anchor="midleft")
+            if self.drop:                                            # the open list, on top of everything
+                opts = self.options(self.drop)
+                area = opts[0][0].unionall([r for r, _ in opts]).inflate(16, 16)
+                pygame.draw.rect(surf, (12, 8, 18), area, border_radius=12)
+                pygame.draw.rect(surf, GOLD, area, width=2, border_radius=12)
+                now = ev.theme if self.drop == "everyone" else mine_theme
+                for rect, v in opts:
+                    text = "SAME AS EVERYONE" if v == "same" else THEME_NAMES[v]
+                    self.draw_choice(surf, rect, v, text, v == now, rect.collidepoint(mouse), 15)
         else:
             self.text_box(surf, self.search_box, self.search, self.focus == "search", "search for a player")
             self.btn_refresh.draw(surf, mouse, not self.list_flow)
@@ -16316,7 +16378,9 @@ THEME_BACK = {"halloween": ((50, 20, 60), (255, 140, 20)), "winter": ((25, 55, 1
               "valentines": ((170, 20, 55), (255, 190, 210)), "easter": ((150, 120, 210), (255, 240, 170)),
               "summer": ((20, 150, 180), (255, 220, 90)), "christmas": ((150, 20, 30), (230, 190, 80)),
               "stpatricks": ((20, 110, 50), (255, 215, 80)), "anniversary": ((60, 20, 90), (240, 200, 90)),
-              "fall": ((120, 55, 20), (255, 190, 90)), "spring": ((150, 210, 150), (255, 180, 210))}
+              "fall": ((120, 55, 20), (255, 190, 90)), "spring": ((150, 210, 150), (255, 180, 210)),
+              "thunderdome": ((10, 10, 30), (0, 230, 255)), "basscanyon": ((40, 15, 20), (255, 140, 40)),
+              "lostlands": ((20, 50, 25), (140, 255, 120))}
 
 
 def make_themed_back(theme):
@@ -16368,6 +16432,8 @@ def draw_theme_ball(surf, x, y, r):
             pygame.draw.circle(s, (255, 170, 195), (c - R * 0.42, c - R * 0.42), R * 0.2)
         elif t == "easter":
             theme_icon(s, t, c, c, R * 1.02)
+        elif festival_ball(s, t, c, R):
+            pass
         elif t in ("christmas", "fall", "spring"):              # an ornament, an acorn, a ladybug
             theme_icon(s, t, c, c + (R * 0.1 if t == "christmas" else 0), R, alt=t != "christmas")
         elif t == "stpatricks":                                 # a gold coin
@@ -16409,6 +16475,9 @@ CUP_THEME = {   # body, shine, stripes, rim (dark), rim (light), base
     "anniversary": ((110, 50, 170), (160, 110, 220), (240, 200, 90), (75, 30, 125), (140, 85, 200), (65, 25, 110)),
     "fall": ((190, 95, 30), (230, 145, 70), (110, 60, 25), (140, 65, 20), (215, 120, 50), (120, 55, 15)),
     "spring": ((140, 210, 150), (190, 240, 200), (255, 170, 200), (95, 165, 110), (160, 225, 170), (85, 150, 100)),
+    "thunderdome": ((20, 20, 40), (60, 60, 110), (0, 230, 255), (10, 10, 25), (40, 40, 80), (8, 8, 20)),
+    "basscanyon": ((45, 40, 45), (90, 85, 95), (255, 140, 40), (25, 22, 28), (70, 65, 75), (20, 18, 22)),
+    "lostlands": ((110, 100, 85), (160, 150, 130), (80, 170, 70), (75, 68, 58), (140, 130, 110), (65, 58, 48)),
 }
 
 # ---- coin flip faces ----------------------------------------------------------------------
@@ -16423,6 +16492,9 @@ COIN_THEME = {   # rim, face dark, face light, ring, ink
     "anniversary": ((150, 150, 160), (200, 200, 210), (250, 250, 255), (170, 170, 185), (80, 40, 120)),
     "fall": ((120, 60, 20), (200, 120, 50), (250, 190, 120), (160, 85, 30), (70, 30, 10)),
     "spring": ((110, 160, 110), (190, 230, 190), (240, 255, 240), (140, 190, 140), (170, 60, 110)),
+    "thunderdome": ((0, 90, 120), (15, 20, 50), (40, 60, 120), (0, 200, 240), (140, 245, 255)),
+    "basscanyon": ((120, 60, 15), (40, 30, 35), (90, 70, 70), (255, 140, 40), (255, 200, 120)),
+    "lostlands": ((120, 80, 30), (200, 140, 50), (250, 200, 110), (160, 110, 40), (40, 60, 20)),
 }
 
 
@@ -16457,6 +16529,9 @@ DIE_THEME = {   # edge, face, shine, pips
     "anniversary": ((170, 130, 40), (230, 190, 80), (250, 225, 140), (80, 30, 120)),
     "fall": ((110, 55, 20), (200, 120, 50), (235, 165, 90), (60, 25, 10)),
     "spring": ((150, 200, 150), (225, 250, 225), (245, 255, 245), (220, 80, 140)),
+    "thunderdome": ((0, 120, 160), (15, 15, 35), (40, 40, 80), (0, 230, 255)),
+    "basscanyon": ((20, 18, 22), (45, 40, 48), (80, 75, 85), (255, 150, 40)),
+    "lostlands": ((90, 85, 75), (150, 140, 120), (185, 175, 155), (40, 90, 30)),
 }
 
 # ---- slot machine: three of the fruit become seasonal (same payouts) --------------------------
@@ -16467,6 +16542,9 @@ THEME_SLOTS = {"halloween": {"cherry": "candycorn", "lemon": "pumpkin", "orange"
                "anniversary": {"cherry": "cake", "lemon": "star", "orange": "gift"},
                "fall": {"cherry": "apple", "lemon": "leaf", "orange": "acorn"},
                "spring": {"cherry": "ladybug", "lemon": "tulip", "orange": "blossom"},
+               "thunderdome": {"cherry": "bolt", "lemon": "dome", "orange": "laserx"},
+               "basscanyon": {"cherry": "speaker", "lemon": "spotlight", "orange": "cactus"},
+               "lostlands": {"cherry": "dinoegg", "lemon": "trex", "orange": "asteroid"},
                "valentines": {"cherry": "heart", "lemon": "rose", "orange": "letter"},
                "easter": {"cherry": "egg", "lemon": "chick", "orange": "carrot"},
                "summer": {"cherry": "watermelon", "lemon": "sun", "orange": "beachball"}}
@@ -16725,6 +16803,8 @@ def draw_blossom(surf, x, y, r, col=(255, 185, 210)):
 
 def theme_icon2(surf, theme, cx, cy, r, alt):
     """The newer seasons' emblems. Returns False for a theme it doesn't know."""
+    if theme in FESTIVALS:
+        return festival_icon(surf, theme, cx, cy, r, alt)
     if theme == "christmas" and not alt:                          # ornament bauble
         pygame.draw.circle(surf, (205, 25, 40), (cx, cy + r * 0.12), r * 0.78)
         pygame.draw.arc(surf, (255, 215, 90), (cx - r * 0.78, cy - r * 0.2, r * 1.56, r * 0.6), math.pi, 2 * math.pi,
@@ -16780,6 +16860,8 @@ def theme_icon2(surf, theme, cx, cy, r, alt):
 
 def backdrop2(s, name, rng):
     """The newer seasons' scenes behind the lobby and main menu."""
+    if name in FESTIVALS:
+        return festival_backdrop(s, name, rng)
     if name == "christmas":
         s.blit(make_backdrop("winter"), (0, 0))
         for x, h in ((105, 250), (1175, 250)):
@@ -16859,6 +16941,8 @@ def backdrop2(s, name, rng):
 
 
 def corners2(s, name, y0):
+    if name in FESTIVALS:
+        return festival_corners(s, name, y0)
     if name == "christmas":
         draw_wreath(s, 44, y0 + 44, 26)
         draw_wreath(s, W - 44, y0 + 44, 26)
@@ -16887,6 +16971,8 @@ def corners2(s, name, y0):
 
 
 def new_extra2(name, e, y):
+    if name in FESTIVALS:
+        return festival_extra(name, e, y)
     if name == "christmas":                  # Santa's sleigh flies across now and then
         e.update(x=random.choice([-260.0, W + 260.0]), y=random.uniform(90, 230), vy=0.0)
         e["vx"] = random.uniform(80, 120) * (1 if e["x"] < 0 else -1)
@@ -16906,6 +16992,8 @@ def new_extra2(name, e, y):
 
 
 def draw_extra2(surf, name, e, t):
+    if name in FESTIVALS:
+        return festival_draw_extra(surf, name, e, t)
     x, y, s = e["x"], e["y"], e["s"]
     d = 1 if e.get("vx", 0) >= 0 else -1
     if name == "christmas":
@@ -16963,6 +17051,8 @@ def draw_extra2(surf, name, e, t):
 
 
 def new_part2(name, p, y):
+    if name in FESTIVALS:
+        return festival_part(name, p, y)
     if name == "christmas":
         p.update(vy=random.uniform(30, 90), vx=random.uniform(-15, 15))
     elif name == "stpatricks":
@@ -16982,6 +17072,8 @@ def new_part2(name, p, y):
 
 
 def draw_part2(surf, name, p, t):
+    if name in FESTIVALS:
+        return festival_draw_part(surf, name, p, t)
     x, y, s = p["x"], p["y"], p["s"]
     if name == "christmas":
         pygame.draw.circle(surf, (245, 250, 255), (x, y), 1.5 + 2.2 * s)
@@ -17008,6 +17100,8 @@ def draw_part2(surf, name, p, t):
 
 
 def garland2(surf, name, y, t):
+    if name in FESTIVALS:
+        return festival_garland(surf, name, y, t)
     if name in ("stpatricks", "anniversary"):                # flags
         cols = ([(40, 160, 70), (255, 255, 255), (255, 200, 60)] if name == "stpatricks"
                 else [(255, 210, 70), (130, 70, 200), (255, 255, 255), (230, 80, 130)])
@@ -17034,11 +17128,15 @@ def garland2(surf, name, y, t):
 
 THEME_SLOT_ICONS = {"xtree": ("christmas", True), "shamrock": ("stpatricks", False), "potofgold": ("stpatricks", True),
                     "star": ("anniversary", False), "gift": ("anniversary", True), "leaf": ("fall", False),
-                    "acorn": ("fall", True), "tulip": ("spring", False), "ladybug": ("spring", True)}
+                    "acorn": ("fall", True), "tulip": ("spring", False), "ladybug": ("spring", True),
+                    "bolt": ("thunderdome", False), "dome": ("thunderdome", True), "speaker": ("basscanyon", False),
+                    "spotlight": ("basscanyon", True), "trex": ("lostlands", False)}
 
 
 def theme_symbol2(s, kind, cx, cy, r):
     """The newer seasons' slot symbols. Returns False for one it doesn't know."""
+    if festival_symbol(s, kind, cx, cy, r):
+        return True
     if kind == "xtree":                                        # the tree fills its square on the reel
         draw_xmas_tree(s, cx, cy + r * 0.12, r * 1.05)
     elif kind in THEME_SLOT_ICONS:
@@ -17078,6 +17176,8 @@ def theme_symbol2(s, kind, cx, cy, r):
 
 
 def bomb2(surf, t, cx, cy, r):
+    if t in FESTIVALS:
+        return festival_bomb(surf, t, cx, cy, r)
     if t == "winter":                                          # a jagged chunk of ice
         pts = [(cx + math.cos(a) * r * (0.7 + 0.3 * ((i * 7) % 3) / 2), cy + math.sin(a) * r * (0.7 + 0.3 * ((i * 5) % 3) / 2))
                for i, a in enumerate([i / 10 * 2 * math.pi for i in range(10)])]
@@ -17119,6 +17219,8 @@ def bomb2(surf, t, cx, cy, r):
 
 
 def costume2(surf, t, x, y, k, top):
+    if t in FESTIVALS:
+        return festival_costume(surf, t, x, y, k, top)
     if t == "christmas":                                       # Santa hat
         pygame.draw.polygon(surf, (210, 30, 40), [(x - 13 * k, top), (x + 13 * k, top), (x + 18 * k, top - 22 * k)])
         pygame.draw.rect(surf, (250, 250, 250), (x - 15 * k, top - 3 * k, 30 * k, 7 * k), border_radius=int(3 * k))
@@ -17142,6 +17244,405 @@ def costume2(surf, t, x, y, k, top):
         for i in range(5):
             draw_blossom(surf, x - 14 * k + i * 7 * k, top - 2 * k - (3 * k if i in (1, 3) else 0), 4 * k,
                          [(255, 185, 210), (255, 255, 255), (255, 225, 120)][i % 3])
+    else:
+        return False
+    return True
+
+
+# ---- festivals: Thunderdome (neon and lasers), Bass Canyon (a stage in the desert), Lost Lands (dinosaurs) -------
+FESTIVALS = ("thunderdome", "basscanyon", "lostlands")
+NEON = [(0, 230, 255), (255, 40, 220), (120, 255, 80)]
+BOLT = [(0.15, -1), (-0.45, 0.1), (-0.05, 0.1), (-0.25, 1), (0.5, -0.2), (0.08, -0.2), (0.4, -1)]
+TREX = [(-0.9, -0.2), (-0.6, -0.6), (0.1, -0.72), (0.6, -0.52), (0.95, -0.3), (0.95, 0.0), (0.4, 0.05), (0.9, 0.15),
+        (0.85, 0.38), (0.2, 0.38), (-0.3, 0.8), (-0.8, 0.7), (-0.92, 0.2)]
+
+
+def draw_bolt(surf, cx, cy, r, col=(140, 245, 255)):
+    pts = [(cx + x * r * 0.8, cy + y * r) for x, y in BOLT]
+    pygame.draw.polygon(surf, darken(col, 90), [(x + 2, y + 2) for x, y in pts])
+    pygame.draw.polygon(surf, col, pts)
+    pygame.draw.lines(surf, (255, 255, 255), False, pts[:3], max(1, int(r * 0.06)))
+
+
+def draw_speaker(surf, cx, cy, r, lit=None):
+    box = pygame.Rect(0, 0, r * 1.5, r * 1.9)
+    box.center = (cx, cy)
+    pygame.draw.rect(surf, (35, 33, 40), box, border_radius=max(1, int(r * 0.12)))
+    pygame.draw.rect(surf, (80, 78, 90), box, max(1, int(r * 0.06)), border_radius=max(1, int(r * 0.12)))
+    pygame.draw.circle(surf, (120, 118, 130), (cx, cy + r * 0.25), r * 0.55)
+    pygame.draw.circle(surf, (20, 20, 24), (cx, cy + r * 0.25), r * 0.42)
+    pygame.draw.circle(surf, lit or (70, 70, 80), (cx, cy + r * 0.25), r * 0.14)
+    pygame.draw.circle(surf, (120, 118, 130), (cx, cy - r * 0.55), r * 0.22)
+    pygame.draw.circle(surf, (20, 20, 24), (cx, cy - r * 0.55), r * 0.13)
+
+
+def draw_trex(surf, cx, cy, r, col=(70, 170, 70), flip=False):
+    d = -1 if flip else 1
+    pts = [(cx + x * r * d, cy + y * r) for x, y in TREX]
+    pygame.draw.polygon(surf, col, pts)
+    for i in range(4):                                         # teeth
+        tx = cx + (0.45 + i * 0.13) * r * d
+        pygame.draw.polygon(surf, (250, 250, 235), [(tx, cy + 0.03 * r), (tx + 0.08 * r * d, cy + 0.03 * r),
+                                                    (tx + 0.04 * r * d, cy + 0.2 * r)])
+    pygame.draw.circle(surf, (255, 220, 60), (cx + 0.2 * r * d, cy - 0.42 * r), max(1, r * 0.12))
+    pygame.draw.circle(surf, (20, 20, 20), (cx + 0.23 * r * d, cy - 0.42 * r), max(1, r * 0.05))
+    pygame.draw.line(surf, darken(col, 50), (cx - 0.5 * r * d, cy - 0.45 * r), (cx - 0.1 * r * d, cy - 0.3 * r), 2)
+
+
+def draw_asteroid(surf, cx, cy, r, trail=True):
+    if trail:
+        for k in range(6):
+            f = 1 - k / 6
+            pygame.draw.circle(surf, lerp_col((255, 90, 20), (255, 230, 120), f),
+                               (cx + (k + 1) * r * 0.35, cy - (k + 1) * r * 0.35), r * 0.55 * f)
+    pts = [(cx + math.cos(a) * r * (0.8 + 0.2 * math.sin(a * 5)), cy + math.sin(a) * r * (0.8 + 0.2 * math.cos(a * 3)))
+           for a in [i / 11 * 2 * math.pi for i in range(11)]]
+    pygame.draw.polygon(surf, (120, 100, 85), pts)
+    for dx, dy, cr in ((-0.3, -0.2, 0.2), (0.25, 0.25, 0.16), (0.2, -0.35, 0.1)):
+        pygame.draw.circle(surf, (85, 70, 60), (cx + dx * r, cy + dy * r), r * cr)
+
+
+def draw_dino_egg(surf, cx, cy, r):
+    rect = pygame.Rect(0, 0, r * 1.4, r * 1.85)
+    rect.center = (cx, cy)
+    pygame.draw.ellipse(surf, (225, 215, 170), rect)
+    for dx, dy, sr in ((-0.3, -0.4, 0.13), (0.2, -0.1, 0.16), (-0.15, 0.3, 0.12), (0.3, 0.45, 0.1), (0.05, -0.65, 0.08)):
+        pygame.draw.circle(surf, (110, 140, 70), (cx + dx * r, cy + dy * r), r * sr)
+    pygame.draw.ellipse(surf, (150, 140, 100), rect, max(1, int(r * 0.06)))
+
+
+def festival_icon(surf, theme, cx, cy, r, alt):
+    if theme == "thunderdome" and not alt:
+        draw_bolt(surf, cx, cy, r)
+    elif theme == "thunderdome":                               # a neon dome
+        w = max(2, int(r * 0.12))
+        pygame.draw.circle(surf, (255, 60, 210), (cx, cy + r * 0.45), r * 0.95, w, draw_top_left=True, draw_top_right=True)
+        pygame.draw.line(surf, (255, 60, 210), (cx - r, cy + r * 0.45), (cx + r, cy + r * 0.45), w)
+        for k in (0.35, 0.7):
+            pygame.draw.arc(surf, (0, 230, 255), (cx - r * 0.95, cy + r * 0.45 - r * 0.95 * k, r * 1.9, r * 1.9 * k),
+                            0, math.pi, max(1, w // 2))
+        for dx in (-0.5, 0, 0.5):
+            pygame.draw.line(surf, (0, 230, 255), (cx + dx * r, cy + r * 0.45),
+                             (cx + dx * r * 0.6, cy + r * 0.45 - r * 0.95 * math.cos(dx * 1.2)), max(1, w // 2))
+    elif theme == "basscanyon" and not alt:
+        draw_speaker(surf, cx, cy, r, (255, 140, 40))
+    elif theme == "basscanyon":                                # a stage spotlight
+        pygame.draw.polygon(surf, (255, 230, 150), [(cx - r * 0.25, cy - r * 0.2), (cx + r * 0.25, cy - r * 0.2),
+                                                    (cx + r * 0.8, cy + r), (cx - r * 0.8, cy + r)])
+        pygame.draw.polygon(surf, (45, 42, 50), [(cx - r * 0.45, cy - r * 0.95), (cx + r * 0.45, cy - r * 0.95),
+                                                 (cx + r * 0.35, cy - r * 0.15), (cx - r * 0.35, cy - r * 0.15)])
+        pygame.draw.ellipse(surf, (255, 250, 210), (cx - r * 0.33, cy - r * 0.3, r * 0.66, r * 0.26))
+        pygame.draw.line(surf, (90, 88, 100), (cx - r * 0.55, cy - r * 0.6), (cx + r * 0.55, cy - r * 0.6), max(1, int(r * 0.08)))
+    elif theme == "lostlands" and not alt:
+        draw_trex(surf, cx, cy, r)
+    elif theme == "lostlands":
+        draw_asteroid(surf, cx - r * 0.2, cy + r * 0.2, r * 0.6)
+    else:
+        return False
+    return True
+
+
+def festival_backdrop(s, name, rng):
+    if name == "thunderdome":
+        vx, vy = 640, 560                                      # a neon grid floor running off to the horizon
+        pygame.draw.polygon(s, (20, 5, 40, 230), [(0, 600), (W, 600), (W, H), (0, H)])
+        for k in range(8):
+            y = 600 + (k / 7) ** 2 * 120
+            pygame.draw.line(s, (255, 40, 220, 150), (0, y), (W, y), 2)
+        for x in range(-1200, W + 1300, 110):
+            pygame.draw.line(s, (255, 40, 220, 120), (vx + (x - vx) * 0.25, 600), (x, H), 2)
+        pygame.draw.circle(s, (0, 230, 255, 200), (640, 610), 260, 4, draw_top_left=True, draw_top_right=True)   # the dome
+        for k in (0.4, 0.75):
+            pygame.draw.arc(s, (0, 230, 255, 140), (380, 610 - 260 * k, 520, 520 * k), 0, math.pi, 2)
+        for cx, cy, r in ((70, 150, 46), (1210, 170, 52), (170, 330, 28), (1110, 360, 30)):
+            draw_bolt(s, cx, cy, r, (140, 245, 255) if cx < 640 else (255, 120, 235))
+        for i in range(60):
+            pygame.draw.circle(s, (255, 255, 255, 120), (rng.uniform(0, W), rng.uniform(60, 560)), 1)
+    elif name == "basscanyon":
+        for side in (0, 1):                                    # red rock canyon walls
+            for layer, col in enumerate(((95, 40, 30, 235), (70, 28, 24, 245))):
+                pts = [(0 if side == 0 else W, H)]
+                for k in range(9):
+                    y = H - k * 60
+                    x = (180 + layer * 60 + rng.uniform(-40, 40) + (k % 3) * 25) * (1 if k < 8 else 0.4)
+                    pts.append((x if side == 0 else W - x, y))
+                pts.append((0 if side == 0 else W, 0))
+                pygame.draw.polygon(s, col, pts)
+        pygame.draw.rect(s, (30, 25, 35, 250), (340, 640, 600, 80))                   # the stage
+        pygame.draw.rect(s, (60, 20, 70, 230), (430, 470, 420, 160))                   # LED screen
+        for i in range(12):
+            pygame.draw.rect(s, (*[(255, 140, 40), (200, 60, 200), (60, 160, 255)][i % 3], 150), (440 + i * 34, 480, 26, 140))
+        for x in (380, 900):                                   # truss towers
+            for dx in (-14, 14):
+                pygame.draw.line(s, (170, 170, 180, 230), (x + dx, 640), (x + dx, 440), 3)
+            for y in range(440, 640, 20):
+                pygame.draw.line(s, (170, 170, 180, 200), (x - 14, y), (x + 14, y + 20), 2)
+        for y in (440, 456):
+            pygame.draw.line(s, (170, 170, 180, 230), (366, y), (914, y), 3)
+        for sx in (300, 980):                                  # speaker stacks
+            for k in range(3):
+                draw_speaker(s, sx, 690 - k * 50, 22)
+        for x in range(0, W, 26):                               # the crowd
+            hx = x + rng.uniform(-5, 5)
+            pygame.draw.circle(s, (15, 10, 18), (hx, 700 + rng.uniform(-6, 6)), 11)
+            if rng.random() < 0.35:
+                pygame.draw.line(s, (15, 10, 18), (hx + 6, 700), (hx + 14, 668 + rng.uniform(-8, 8)), 5)
+        pygame.draw.rect(s, (15, 10, 18), (0, 708, W, 12))
+    elif name == "lostlands":
+        pygame.draw.circle(s, (240, 240, 210, 220), (200, 120), 40)                    # moon
+        pygame.draw.polygon(s, (45, 30, 30, 245), [(930, H), (1050, 450), (1110, 450), (1250, H)])   # volcano
+        pygame.draw.polygon(s, (255, 110, 30, 230), [(1050, 450), (1110, 450), (1095, 470), (1065, 470)])
+        for dx, ln in ((-20, 110), (10, 160), (35, 90)):
+            pygame.draw.line(s, (255, 120, 30, 200), (1080 + dx * 0.3, 460), (1080 + dx, 460 + ln), 5)
+        for i in range(8):
+            pygame.draw.circle(s, (255, 120, 40, 14), (1080, 440), 120 - i * 12)
+        dark = (40, 84, 46, 250)
+        pygame.draw.ellipse(s, dark, (40, 560, 190, 80))                              # a brachiosaurus
+        for lx in (70, 110, 170, 200):
+            pygame.draw.rect(s, dark, (lx, 620, 18, 70))
+        pygame.draw.polygon(s, dark, [(50, 590), (0, 640), (60, 612)])
+        pygame.draw.polygon(s, dark, [(190, 580), (220, 580), (268, 410), (248, 404)])
+        pygame.draw.ellipse(s, dark, (240, 392, 52, 26))
+        draw_trex(s, 1030, 600, 55, dark, flip=True)                                   # a T-rex
+        pygame.draw.ellipse(s, dark, (1040, 600, 130, 70))
+        pygame.draw.polygon(s, dark, [(1160, 620), (1250, 600), (1165, 650)])
+        for lx in (1070, 1120):
+            pygame.draw.rect(s, dark, (lx, 650, 22, 45))
+        for x in range(0, W, 60):                               # ferns
+            base = 715
+            for k in range(-3, 4):
+                ang = -math.pi / 2 + k * 0.32
+                ex, ey = x + math.cos(ang) * 60, base + math.sin(ang) * 60
+                pygame.draw.line(s, (30, 80, 35, 245), (x, base), (ex, ey), 4)
+                for f in (0.4, 0.7):
+                    pygame.draw.ellipse(s, (40, 100, 45, 245), (x + (ex - x) * f - 7, base + (ey - base) * f - 4, 14, 8))
+        for cx, cy in ((520, 90), (820, 160)):                 # asteroids streaking in
+            draw_asteroid(s, cx, cy, 14)
+    else:
+        return False
+    return True
+
+
+def festival_corners(s, name, y0):
+    if name == "thunderdome":
+        draw_bolt(s, 30, y0 + 40, 30)
+        draw_bolt(s, W - 30, y0 + 40, 30, (255, 120, 235))
+    elif name == "basscanyon":
+        for cx in (30, W - 30):
+            draw_speaker(s, cx, y0 + 34, 18, (255, 140, 40))
+            draw_speaker(s, cx, y0 + 78, 18, (255, 140, 40))
+    elif name == "lostlands":
+        for x0, d in ((0, 1), (W, -1)):
+            for k, ang in enumerate((0.2, 0.55, 0.9)):
+                ex, ey = x0 + d * math.cos(ang) * 110, y0 + math.sin(ang) * 110
+                pygame.draw.line(s, (35, 100, 40), (x0, y0), (ex, ey), 4)
+                for f in (0.3, 0.5, 0.7, 0.9):
+                    px, py = x0 + (ex - x0) * f, y0 + (ey - y0) * f
+                    pygame.draw.ellipse(s, (60, 140, 60), (px - 8, py - 5, 16, 10))
+    else:
+        return False
+    return True
+
+
+def festival_extra(name, e, y):
+    if name == "thunderdome":                                  # neon rings drifting
+        e.update(vx=random.uniform(-20, 20), vy=random.uniform(-15, 15), col=random.choice(NEON))
+    elif name == "basscanyon":                                 # camera drones over the crowd
+        e.update(x=random.choice([-40.0, W + 40.0]), y=random.uniform(90, 300), vy=0.0)
+        e["vx"] = random.uniform(40, 70) * (1 if e["x"] < 0 else -1)
+    elif name == "lostlands":                                  # asteroids streaking across the sky
+        e.update(x=random.uniform(200, W + 300), y=-60.0 if y is None else y * 0.4, vx=-random.uniform(160, 260),
+                 vy=random.uniform(90, 150))
+    else:
+        return None
+    return e
+
+
+def festival_draw_extra(surf, name, e, t):
+    x, y, s = e["x"], e["y"], e["s"]
+    if name == "thunderdome":
+        r = 22 * s
+        pts = [(x + math.cos(t * 0.8 + e["ph"] + k * math.pi / 3) * r, y + math.sin(t * 0.8 + e["ph"] + k * math.pi / 3) * r)
+               for k in range(6)]
+        pygame.draw.polygon(surf, darken(e["col"], 90), pts, 5)
+        pygame.draw.polygon(surf, e["col"], pts, 2)
+    elif name == "basscanyon":
+        pygame.draw.rect(surf, (40, 40, 48), (x - 12, y - 4, 24, 8), border_radius=3)
+        for dx in (-14, 14):
+            pygame.draw.line(surf, (40, 40, 48), (x, y), (x + dx, y - 6), 2)
+            pygame.draw.ellipse(surf, (150, 150, 160), (x + dx - 9, y - 9, 18, 4))
+        on = int(t * 3 + e["ph"]) % 2
+        pygame.draw.circle(surf, (255, 40, 40) if on else (40, 255, 80), (x, y + 5), 3)
+    elif name == "lostlands":
+        draw_asteroid(surf, x, y, 13 * s)
+    else:
+        return False
+    return True
+
+
+def festival_part(name, p, y):
+    if name == "thunderdome":                                  # neon sparks floating up
+        p.update(y=H + 10.0 if y is None else y, vy=-random.uniform(30, 80), vx=random.uniform(-10, 10),
+                 col=random.choice(NEON))
+    elif name == "basscanyon":                                 # dust and embers in the stage lights
+        p.update(y=H + 10.0 if y is None else y, vy=-random.uniform(15, 40), vx=random.uniform(-15, 15),
+                 col=random.choice([(255, 170, 80), (255, 220, 150), (255, 120, 60)]))
+    elif name == "lostlands":                                  # fireflies
+        p.update(vy=random.uniform(-12, 12), vx=random.uniform(-15, 15), col=random.choice([(200, 255, 120), (255, 230, 120)]))
+    else:
+        return None
+    return p
+
+
+def festival_draw_part(surf, name, p, t):
+    x, y, s = p["x"], p["y"], p["s"]
+    if name in FESTIVALS:
+        glow = 0.5 + 0.5 * math.sin(t * 4 + p["ph"])
+        r = (1.2 + 1.6 * s) * (0.7 + 0.5 * glow if name == "lostlands" else 1)
+        pygame.draw.circle(surf, darken(p["col"], 60), (x, y), r + 2)
+        pygame.draw.circle(surf, p["col"], (x, y), r)
+        return True
+    return False
+
+
+def festival_garland(surf, name, y, t):
+    if name == "thunderdome":                                  # a neon tube with chasing LEDs
+        for w, col in ((7, (0, 70, 100)), (3, (0, 230, 255)), (1, (255, 255, 255))):
+            pygame.draw.line(surf, col, (0, y + 3), (W, y + 3), w)
+        for i, x in enumerate(range(12, W, 36)):
+            on = (i - int(t * 10)) % 8 == 0
+            pygame.draw.circle(surf, (255, 60, 220) if on else (90, 20, 80), (x, y + 12), 4 if on else 3)
+    elif name == "basscanyon":                                 # a lighting truss with par cans
+        for yy in (y + 2, y + 14):
+            pygame.draw.line(surf, (160, 160, 170), (0, yy), (W, yy), 2)
+        for x in range(0, W, 24):
+            pygame.draw.line(surf, (130, 130, 140), (x, y + 2), (x + 12, y + 14), 1)
+            pygame.draw.line(surf, (130, 130, 140), (x + 12, y + 14), (x + 24, y + 2), 1)
+        for i, x in enumerate(range(60, W, 120)):
+            col = [(255, 140, 40), (200, 60, 220), (60, 170, 255), (255, 60, 60)][(i + int(t * 1.5)) % 4]
+            pygame.draw.rect(surf, (40, 38, 45), (x - 8, y + 14, 16, 16), border_radius=3)
+            pygame.draw.circle(surf, col, (x, y + 30), 6)
+    elif name == "lostlands":                                  # jungle vines
+        pts = [(x, y + 6 + 5 * math.sin(x / 40)) for x in range(0, W + 1, 16)]
+        pygame.draw.lines(surf, (40, 110, 40), False, pts, 4)
+        for i, (x, yy) in enumerate(pts[::3]):
+            pygame.draw.ellipse(surf, (70, 160, 60), (x - 9, yy - 1 + (i % 2) * 4, 18, 10))
+            if i % 4 == 0:
+                ln = 18 + (i * 7) % 20
+                pygame.draw.line(surf, (40, 110, 40), (x, yy), (x + 3, yy + ln), 2)
+                pygame.draw.ellipse(surf, (70, 160, 60), (x - 4, yy + ln - 4, 12, 7))
+    else:
+        return False
+    return True
+
+
+def festival_show(fx, name, t, strong):
+    """The moving part of a festival: sweeping lasers, or stage spotlights. Drawn onto fx (see-through)."""
+    k = 1.0 if strong else 0.45
+    if name == "thunderdome":
+        for i, (ox, oy) in enumerate(((0, H), (W, H), (W * 0.3, H), (W * 0.7, H))):
+            for j in range(3):
+                ang = -math.pi / 2 + math.sin(t * (0.5 + 0.15 * i) + j * 0.8 + i) * 0.95
+                end = (ox + math.cos(ang) * 1700, oy + math.sin(ang) * 1700)
+                col = NEON[(i + j) % 3]
+                pygame.draw.line(fx, (*col, int(80 * k)), (ox, oy), end, 6)
+                pygame.draw.line(fx, (255, 255, 255, int(110 * k)), (ox, oy), end, 1)
+    elif name == "lostlands":
+        for i, ox in enumerate((W * 0.2, W * 0.5, W * 0.8)):
+            for j in range(4):
+                ang = -math.pi / 2 + math.sin(t * 0.7 + j * 0.9 + i * 2) * 0.8
+                end = (ox + math.cos(ang) * 1600, H + math.sin(ang) * 1600)
+                col = (120, 255, 80) if (i + j) % 3 else (255, 80, 60)
+                pygame.draw.line(fx, (*col, int(70 * k)), (ox, H), end, 4)
+    elif name == "basscanyon":
+        for i, ox in enumerate(range(160, W, 240)):
+            ang = math.pi / 2 + math.sin(t * 0.6 + i * 1.3) * 0.5
+            col = [(255, 200, 120), (255, 140, 40), (220, 120, 255), (120, 200, 255)][i % 4]
+            for w, a in ((0.16, 26), (0.08, 36)):
+                p1 = (ox + math.cos(ang - w) * 900, 56 + math.sin(ang - w) * 900)
+                p2 = (ox + math.cos(ang + w) * 900, 56 + math.sin(ang + w) * 900)
+                pygame.draw.polygon(fx, (*col, int(a * k)), [(ox, 56), p1, p2])
+    else:
+        return False
+    return True
+
+
+def festival_symbol(s, kind, cx, cy, r):
+    if kind == "laserx":                                       # crossing lasers
+        for (x0, y0), col in (((cx - r, cy + r), (0, 230, 255)), ((cx + r, cy + r), (255, 40, 220))):
+            x1, y1 = cx * 2 - x0, cy - r
+            pygame.draw.line(s, darken(col, 80), (x0, y0), (x1, y1), int(r * 0.3))
+            pygame.draw.line(s, col, (x0, y0), (x1, y1), int(r * 0.16))
+            pygame.draw.line(s, (255, 255, 255), (x0, y0), (x1, y1), max(1, int(r * 0.05)))
+        pygame.draw.circle(s, (255, 255, 255), (cx, cy), r * 0.14)
+    elif kind == "cactus":
+        green = (60, 150, 70)
+        pygame.draw.rect(s, green, (cx - r * 0.2, cy - r * 0.9, r * 0.4, r * 1.8), border_radius=int(r * 0.2))
+        pygame.draw.rect(s, green, (cx - r * 0.75, cy - r * 0.35, r * 0.3, r * 0.75), border_radius=int(r * 0.15))
+        pygame.draw.rect(s, green, (cx - r * 0.75, cy + r * 0.2, r * 0.6, r * 0.25), border_radius=int(r * 0.12))
+        pygame.draw.rect(s, green, (cx + r * 0.45, cy - r * 0.6, r * 0.3, r * 0.7), border_radius=int(r * 0.15))
+        pygame.draw.rect(s, green, (cx + r * 0.1, cy - r * 0.05, r * 0.6, r * 0.25), border_radius=int(r * 0.12))
+        pygame.draw.ellipse(s, (240, 90, 140), (cx - r * 0.18, cy - r * 1.05, r * 0.36, r * 0.25))
+    elif kind == "dinoegg":
+        draw_dino_egg(s, cx, cy, r)
+    elif kind == "asteroid":
+        draw_asteroid(s, cx - r * 0.2, cy + r * 0.2, r * 0.6)
+    else:
+        return False
+    return True
+
+
+def festival_ball(s, t, c, R):
+    if t == "thunderdome":                                     # a glowing neon orb
+        for i in range(6):
+            pygame.draw.circle(s, lerp_col((0, 60, 90), (0, 230, 255), i / 5), (c, c), R * (1 - i * 0.12))
+        pygame.draw.circle(s, (255, 255, 255), (c - R * 0.3, c - R * 0.3), R * 0.2)
+    elif t == "basscanyon":                                    # a speaker cone
+        pygame.draw.circle(s, (130, 128, 140), (c, c), R)
+        pygame.draw.circle(s, (25, 25, 30), (c, c), R * 0.78)
+        pygame.draw.circle(s, (255, 140, 40), (c, c), R * 0.25)
+    elif t == "lostlands":
+        draw_dino_egg(s, c, c, R * 0.95)
+    else:
+        return False
+    return True
+
+
+def festival_bomb(surf, t, cx, cy, r):
+    if t == "thunderdome":                                     # a short circuit
+        for i in range(10):
+            a = i / 10 * 2 * math.pi
+            pygame.draw.line(surf, (255, 80, 60), (cx, cy), (cx + math.cos(a) * r * 1.1, cy + math.sin(a) * r * 1.1), 2)
+        pygame.draw.circle(surf, (30, 10, 20), (cx, cy), r * 0.55)
+        draw_bolt(surf, cx, cy, r * 0.5, (255, 90, 70))
+    elif t == "basscanyon":                                    # a blown speaker
+        draw_speaker(surf, cx, cy, r * 0.8)
+        pygame.draw.lines(surf, (255, 90, 60), False, [(cx - r * 0.3, cy - r * 0.1), (cx, cy + r * 0.2),
+                                                       (cx - r * 0.1, cy + r * 0.45), (cx + r * 0.25, cy + r * 0.6)], 3)
+        for k in range(3):
+            pygame.draw.circle(surf, (120, 120, 130), (cx + r * 0.4 + k * 6, cy - r * 0.9 - k * 8), r * 0.18 + k * 2)
+    elif t == "lostlands":
+        draw_asteroid(surf, cx - r * 0.2, cy + r * 0.2, r * 0.7)
+    else:
+        return False
+    return True
+
+
+def festival_costume(surf, t, x, y, k, top):
+    if t == "thunderdome":                                     # an LED visor
+        pygame.draw.rect(surf, (0, 70, 100), (x - 17 * k, y - 13 * k, 34 * k, 10 * k), border_radius=int(4 * k))
+        pygame.draw.rect(surf, (0, 230, 255), (x - 15 * k, y - 11 * k, 30 * k, 6 * k), border_radius=int(3 * k))
+        pygame.draw.line(surf, (255, 255, 255), (x - 12 * k, y - 9 * k), (x + 12 * k, y - 9 * k), max(1, int(k)))
+    elif t == "basscanyon":                                    # headphones
+        pygame.draw.arc(surf, (40, 40, 48), (x - 16 * k, top - 12 * k, 32 * k, 30 * k), 0, math.pi, max(2, int(4 * k)))
+        for dx in (-16, 16):
+            pygame.draw.ellipse(surf, (40, 40, 48), (x + dx * k - 5 * k, top + 2 * k, 10 * k, 14 * k))
+            pygame.draw.ellipse(surf, (255, 140, 40), (x + dx * k - 3 * k, top + 5 * k, 6 * k, 8 * k))
+    elif t == "lostlands":                                     # a dinosaur hood with spikes
+        for i in range(4):
+            sx = x - 9 * k + i * 6 * k
+            pygame.draw.polygon(surf, (70, 170, 70), [(sx - 4 * k, top + 2 * k), (sx + 4 * k, top + 2 * k),
+                                                      (sx, top - 9 * k - (3 * k if i in (1, 2) else 0))])
     else:
         return False
     return True
@@ -21319,9 +21820,12 @@ class App:
                 self.net_server.update(dt)
             if self.net and not self.net.update(dt):
                 self.leave_game(self.net.why or getattr(self.net.link, "why", "") or "Lost the connection to the game host")
-            for ev in self.market.pop_alerts():
-                self.effects.toast(ev["title"], ev["sub"], ev["kind"])
-                self.sfx("alert")
+            if self.scene not in ("title", "account"):         # not over the main menu / while logging in
+                news = [ev for ev in self.market.pop_alerts()      # news from while you were away: only your stocks
+                        if not ev.get("away") or any(self.market.shares(sym) > 0 for sym in ev.get("syms", []))]
+                for ev in news[-3:]:
+                    self.effects.toast(ev["title"], ev["sub"], ev["kind"])
+                    self.sfx("alert")
             for bet in self.market.pop_settled():
                 self.balance += bet["payout"]
                 self.record("stockbet", bet["amount"], bet["payout"])
