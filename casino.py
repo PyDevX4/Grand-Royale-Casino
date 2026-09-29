@@ -17799,19 +17799,10 @@ class Menu:
             "mp_crash": lambda: art_party("crash")(aw, ah), "mp_highcard": lambda: art_party("hc")(aw, ah),
             "mp_liars": lambda: art_party("liar")(aw, ah), "mp_bingo": lambda: art_party("bingo")(aw, ah),
         }
-        self.art = {}
-        for key, make in makers.items():
-            img = make()
-            m = pygame.Surface(img.get_size(), pygame.SRCALPHA)       # round the corners of every picture
-            pygame.draw.rect(m, (255, 255, 255, 255), m.get_rect(), border_radius=12)
-            framed = img.copy()
-            framed.blit(m, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
-            self.art[key] = framed
-        self.art_masks = {}
-        for key, art in self.art.items():
-            m = art.copy()
-            m.fill((255, 255, 255, 0), special_flags=pygame.BLEND_RGBA_MAX)
-            self.art_masks[key] = m
+        self.makers = makers
+        self.art_by_theme = {}          # theme -> pictures (some use the seasonal card backs, coins, cups...)
+        self.art_theme = None
+        self.update_art()
         self.tab = 0
         tw_ = min(222, (W - 40) // len(CATEGORIES))
         x0 = (W - (len(CATEGORIES) * tw_ - 10)) / 2
@@ -17857,6 +17848,28 @@ class Menu:
         for i in range(60):
             pygame.draw.line(self.art_shine, (255, 255, 255, int(120 * (1 - abs(i - 30) / 30))), (i + 30, 0), (i, ah), 2)
 
+
+    def update_art(self):
+        """Redraw the game pictures when the theme changes, so they always match it."""
+        if self.art_theme == CURRENT_THEME:
+            return
+        self.art_theme = CURRENT_THEME
+        if CURRENT_THEME not in self.art_by_theme:
+            art = {}
+            for key, make in self.makers.items():
+                img = make()
+                m = pygame.Surface(img.get_size(), pygame.SRCALPHA)       # round the corners of every picture
+                pygame.draw.rect(m, (255, 255, 255, 255), m.get_rect(), border_radius=12)
+                framed = img.copy()
+                framed.blit(m, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+                art[key] = framed
+            masks = {}
+            for key, pic in art.items():
+                m = pic.copy()
+                m.fill((255, 255, 255, 0), special_flags=pygame.BLEND_RGBA_MAX)
+                masks[key] = m
+            self.art_by_theme[CURRENT_THEME] = (art, masks)
+        self.art, self.art_masks = self.art_by_theme[CURRENT_THEME]
     def layout(self):
         keys = CATEGORIES[self.tab][1]
         gap, per_row = 18, 3
@@ -17986,6 +17999,7 @@ class Menu:
 
     def draw(self, surf):
         mouse = pygame.mouse.get_pos()
+        self.update_art()
         self.draw_background(surf)
         self.draw_title(surf)
         for i, (r, (name, keys)) in enumerate(zip(self.tab_rects, CATEGORIES)):
