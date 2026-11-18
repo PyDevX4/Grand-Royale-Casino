@@ -5,7 +5,7 @@ The one place the version number lives.
 compares it against whatever the newest release says is current.
 """
 
-VERSION = "1.0.17"
+VERSION = "1.0.18"
 
 
 def parse(text):

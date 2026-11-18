@@ -49,6 +49,7 @@ else:
 SAVE_FILE = os.path.join(BASE_DIR, "save.json")
 WEB_SAVE_KEY = "grand_royale_save"     # the browser keeps the save in its local storage
 WEB_DEBUG = False                      # print keys and clicks to the browser console (for fixing web problems)
+TOUCH = False                          # a phone or tablet on the web version (the page tells us - see build_web.py)
 START_BALANCE = 500
 
 CW, CH = 90, 126          # card size
@@ -9417,7 +9418,9 @@ class Pinball(StakeGame):
         self.score, self.balls, self.mult = 0, 3, 1
         self.save_used = False
         self.targets, self.lanes = [True] * 3, [False] * 3
-        self.message = "HOLD SPACE (OR DOWN) TO PULL THE PLUNGER - LET GO TO LAUNCH"
+        self.message = ("HOLD YOUR FINGER DOWN TO PULL THE PLUNGER - LET GO TO LAUNCH" if TOUCH else
+                        "HOLD SPACE (OR DOWN) TO PULL THE PLUNGER - LET GO TO LAUNCH")
+        self.finger_up = False              # (the finger that pressed START mustn't pull the plunger)
         self.new_ball()
         self.app.sfx("chip")
 
@@ -9594,13 +9597,19 @@ class Pinball(StakeGame):
             return
         pressed = pygame.key.get_pressed()
         mouse = pygame.mouse.get_pressed()
+        if not mouse[0]:
+            self.finger_up = True
+        touch = TOUCH and mouse[0] and getattr(self, "finger_up", True) and pygame.mouse.get_pos()[1] > 56
         if self.bot:
             keys = self.bot_keys()
+        elif TOUCH:                                  # phones: hold the left or right half of the screen
+            tx = pygame.mouse.get_pos()[0]
+            keys = [touch and tx < W / 2, touch and tx >= W / 2]
         else:
             keys = [pressed[pygame.K_LEFT] or pressed[pygame.K_z] or pressed[pygame.K_LSHIFT] or mouse[0],
                     pressed[pygame.K_RIGHT] or pressed[pygame.K_m] or pressed[pygame.K_RSHIFT] or mouse[2]]
         if self.state == "plunger":
-            hold = self.bot_hold if self.bot else (pressed[pygame.K_SPACE] or pressed[pygame.K_DOWN])
+            hold = self.bot_hold if self.bot else (pressed[pygame.K_SPACE] or pressed[pygame.K_DOWN] or touch)
             if hold:
                 self.charging = True
                 self.power = min(1.0, self.power + dt * 1.1)
@@ -9696,8 +9705,10 @@ class Pinball(StakeGame):
             pygame.draw.circle(surf, (225, 228, 235) if k < self.balls and self.busy() else (50, 50, 70),
                                (left.centerx - 30 + k * 30, 230), 9)
         draw_text(surf, f"MULTIPLIER x{self.mult}", font(20, bold=True), (255, 200, 90), (left.centerx, 270))
-        tips = ["CONTROLS", "Left flipper:  LEFT arrow / Z / left click", "Right flipper:  RIGHT arrow / M / right click",
-                "Launch:  hold SPACE, then let go", "", "SCORING", "Bumpers 100  -  Slingshots 50",
+        tips = (["CONTROLS", "Left flipper:  hold the left half", "Right flipper:  hold the right half",
+                 "Launch:  hold your finger down, then let go"] if TOUCH else
+                ["CONTROLS", "Left flipper:  LEFT arrow / Z / left click", "Right flipper:  RIGHT arrow / M / right click",
+                 "Launch:  hold SPACE, then let go"]) + ["", "SCORING", "Bumpers 100  -  Slingshots 50",
                 "Drop targets 250  (all 3: +1,500)", "Light R-Y-L lanes: multiplier +1",
                 "Ball save: first 4 seconds, once per ball"]
         for i, t in enumerate(tips):
@@ -10533,7 +10544,7 @@ class Crossy(StakeGame):
         self.reset_world()
         self.feathers = []
         self.state = "play"
-        self.message = "HOP UP WITH THE ARROW KEYS (OR W A S D)"
+        self.message = "TAP WHERE YOU WANT TO HOP" if TOUCH else "HOP UP WITH THE ARROW KEYS (OR W A S D) - OR CLICK"
         self.app.sfx("chip")
 
     def cash_out(self):
@@ -10579,6 +10590,15 @@ class Crossy(StakeGame):
             if self.state == "play":
                 if self.btn_cash.clicked(e.pos, self.can_cash()):
                     self.cash_out()
+                elif 56 < e.pos[1] < 630:                   # tap / click where to hop: ahead, back or to a side
+                    px, py, _ = self.player_pos()
+                    dx, dy = e.pos[0] - px, e.pos[1] - py
+                    if abs(dx) > abs(dy) * 1.2 and abs(dx) > CR_T / 2:
+                        self.move(0, 1 if dx > 0 else -1)
+                    elif dy > CR_T / 2:
+                        self.move(-1, 0)
+                    else:
+                        self.move(1, 0)
                 return
             if self.chip_click(e.pos):
                 return
@@ -13400,8 +13420,10 @@ class Settings:
         self.note = ""
         self.name_box = pygame.Rect(170, 180, 520, 56)
         self.btn_save_name = Button((710, 180, 180, 56), "SAVE NAME", (25, 120, 60), 20)
-        self.btn_sound = Button((170, 330, 260, 56), "", (40, 90, 160), 20)
-        self.btn_full = Button((450, 330, 260, 56), "", (40, 90, 160), 20, "F11")
+        self.btn_sound = Button((170, 330, 220, 56), "", (40, 90, 160), 19)
+        self.btn_full = Button((404, 330, 220, 56), "", (40, 90, 160), 19, "F11")
+        self.btn_theme = Button((638, 330, 220, 56), "", (40, 90, 160), 18)
+        self.btn_owner = Button((872, 330, 220, 56), "OWNER MENU", (170, 120, 20), 19, "OR PRESS `")
         self.btn_delete = Button((170, 520, 420, 64), "DELETE ALL DATA", (150, 35, 40), 22,
                                  f"RESTART WITH {money(START_BALANCE)}")
         self.btn_logout = Button((690, 180, 180, 56), "LOG OUT", (150, 35, 40), 20)
@@ -13470,16 +13492,20 @@ class Settings:
             if self.account_click(e.pos):
                 return
             self.editing = self.name_box.collidepoint(e.pos) and not self.app.session
-            if self.app.session:
-                pass
-            elif self.btn_save_name.clicked(e.pos):
+            if self.btn_save_name.clicked(e.pos) and not self.app.session:    # (accounts keep their username)
                 self.save_name()
+            elif self.btn_owner.clicked(e.pos, self.app.owner_menu.allowed()):
+                self.app.owner_menu.toggle()
             elif self.btn_sound.clicked(e.pos):
                 self.app.sound_on = not self.app.sound_on
                 self.app.save()
                 self.app.sfx("chip")
             elif self.btn_full.clicked(e.pos):
                 toggle_fullscreen()
+            elif self.btn_theme.clicked(e.pos):             # seasonal themes on (follow the casino) or off
+                self.app.theme_mine = "" if self.app.theme_mine == "none" else "none"
+                self.app.save()
+                self.app.sfx("chip")
             elif self.btn_delete.clicked(e.pos):
                 if self.confirm_t > 0:
                     self.app.reset_everything()
@@ -13549,6 +13575,15 @@ class Settings:
         self.btn_sound.draw(surf, mouse)
         self.btn_full.text = "FULLSCREEN"
         self.btn_full.draw(surf, mouse)
+        on = self.app.theme_mine != "none"
+        self.btn_theme.text = f"THEMES: {'ON' if on else 'OFF'}"
+        self.btn_theme.color = (25, 120, 60) if on else (90, 90, 100)
+        live = self.app.events.theme
+        self.btn_theme.hint = (f"NOW: {THEME_NAMES.get(live, 'NONE')}" if on and live else
+                               "SEASONAL LOOKS" if on else "PLAIN CASINO")
+        self.btn_theme.draw(surf, mouse)
+        if self.app.owner_menu.allowed():
+            self.btn_owner.draw(surf, mouse)
         # delete
         pygame.draw.line(surf, (90, 60, 70), (170, 440), (1110, 440), 1)
         draw_text(surf, "DELETE DATA", font(18, bold=True), (240, 110, 110), (170, 470), anchor="midleft")
@@ -20626,6 +20661,8 @@ HELP = {
         ("b", "Launch: hold SPACE (or the Down arrow) to pull back the plunger. Let go to shoot. Hold longer for more power."),
         ("b", "Left flipper: LEFT arrow, Z or left mouse button."),
         ("b", "Right flipper: RIGHT arrow, M or right mouse button."),
+        ("b", "On a phone or tablet: hold the left or right half of the screen to flip, and hold anywhere to pull "
+              "the plunger."),
         ("b", "If the ball falls between the flippers, you lose it. Lose all 3 and the game is over."),
         ("h", "Scoring"),
         ("b", "Pop bumpers: 100 points.  Slingshots (the red triangles): 50 points."),
@@ -20797,6 +20834,7 @@ HELP = {
         ("h", "Controls"),
         ("b", "UP arrow, W or SPACE - hop forward.  DOWN or S - hop back."),
         ("b", "LEFT / RIGHT arrows or A / D - hop sideways. Trees block your way."),
+        ("b", "Or tap (or click) where you want to go: ahead of the chicken, behind it, or to one side."),
         ("b", "ENTER, C or the CASH OUT button - take your winnings."),
         ("h", "Cashing out"),
         ("p", "You can cash out at any time EXCEPT when a car or train is about to hit you - the button says "
@@ -21020,6 +21058,76 @@ class HelpOverlay:
 
 
 # --------------------------------------------------------------------------
+# Phones and tablets (the web version). The page turns taps into clicks and drags into scrolling, and keeps a
+# hidden text box for the phone's keyboard (see PHONE_HTML in build_web.py). This side tells the page where the
+# text boxes are - tapping one opens the keyboard - and turns what's typed into key presses.
+# --------------------------------------------------------------------------
+class PhoneBridge:
+    def __init__(self, app):
+        self.app = app
+        self.sent = None
+
+    def text_fields(self):
+        """Where tapping should bring up the phone's keyboard, on the screen showing right now."""
+        app = self.app
+        om = app.owner_menu
+        if om.active:
+            if om.tab == "events":
+                return [om.money_box] + [b for k, row in om.rows.items() if k in om.dur for b in row["boxes"].values()]
+            if om.tab == "players":
+                return [om.search_box] + ([om.amount_box] if om.pick else [])
+            return []
+        if app.help.active or app.profile.active:
+            return []
+        out = [app.CHAT_BOX] if app.net and app.chat_open else []
+        sc = app.current()
+        if app.scene == "account":
+            out += [sc.boxes[f] for f in sc.fields()]
+        elif app.scene == "settings" and not app.session:
+            out.append(sc.name_box)
+        elif app.scene == "online" and not app.net:
+            out += [sc.name_box, sc.code_box]
+        elif app.scene == "stocks":
+            out.append(sc.qty_rect)
+        return out
+
+    def typing(self):
+        app = self.app
+        if app.owner_menu.active:
+            return bool(app.owner_menu.focus)
+        return bool(app.net and app.chat_open) or app.typing_elsewhere()
+
+    def tick(self):
+        """Every frame, before the game reads its events."""
+        import platform
+        state = json.dumps({"f": [[int(r.x), int(r.y), int(r.w), int(r.h)] for r in self.text_fields()],
+                            "t": 1 if self.typing() else 0})
+        if state != self.sent:
+            self.sent = state
+            platform.window.gr_setfields(state)
+        typed = str(platform.window.gr_takekeys() or "[]")
+        for k in json.loads(typed):
+            if k == "\b":
+                ev = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_BACKSPACE, unicode="", mod=0, scancode=0)
+            elif k == "\n":
+                ev = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, unicode="\r", mod=0, scancode=0)
+            else:
+                ev = pygame.event.Event(pygame.KEYDOWN, key=0, unicode=k, mod=0, scancode=0)
+            pygame.event.post(ev)
+
+
+def phone_web():
+    """Is this the web version on a phone or tablet? (The page works it out before the game starts.)"""
+    if not WEB:
+        return False
+    try:
+        import platform
+        return bool(int(platform.window.eval("String(window.__gr_touch || 0)")))
+    except Exception:
+        return False
+
+
+# --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
 class App:
@@ -21121,6 +21229,9 @@ class App:
             self.events = LiveEvents(self)
             self.themefx = ThemeFX(self)
             self.owner_menu = OwnerMenu(self)
+            global TOUCH
+            TOUCH = phone_web()
+            self.phone = PhoneBridge(self) if TOUCH else None
             self.remembered = remember_load()
             if self.remembered:           # "keep me logged in": log back in while the title plays
                 self.start_account_flow("resume", flow_resume(self.remembered))
@@ -21783,6 +21894,11 @@ class App:
         while True:
             yield
             dt = min(self.clock.tick(FPS) / 1000, 0.05)
+            if self.phone:
+                try:
+                    self.phone.tick()
+                except Exception:
+                    pass
             for e in pygame.event.get():
                 if WEB and WEB_DEBUG and e.type not in (pygame.MOUSEMOTION, pygame.WINDOWMOVED):
                     self.debug_log = (getattr(self, "debug_log", []) + [

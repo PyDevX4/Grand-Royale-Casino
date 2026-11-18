@@ -19,7 +19,8 @@ next time you're in the lobby.
 
 ## Play in a web browser
 
-No download needed - it runs right in the browser (handy for Chromebooks):
+No download needed - it runs right in the browser (handy for Chromebooks), including on phones and tablets:
+tap to play, drag to scroll, and tapping a text box brings up the phone's keyboard. Hold your phone sideways.
 
 **https://pydevx4.github.io/Grand-Royale-Casino/**
 
